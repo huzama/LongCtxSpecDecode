@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Research codebase for long-context speculative decoding built on sparse attention. Currently pre-implementation: the literature survey and research direction live in `notes/`, and `main.py` is a placeholder. Before starting research code, read `notes/survey/dossier.md`, at minimum the TL;DR and section 2 (ranked gaps).
+Research codebase for long-context speculative decoding built on sparse attention. Currently pre-implementation: the literature survey and research direction live in `notes/`, and `main.py` is a placeholder. Before starting research code, read `notes/work/survey/dossier.md`, at minimum the TL;DR and section 2 (ranked gaps).
 
 ## Environment
 
@@ -28,22 +28,21 @@ REPO=$(git rev-parse --show-toplevel) && \
 | Sync environment (uv, Python 3.13) | `uv sync` |
 | Add a dependency | `uv add <package>` |
 | Run the entry point | `.venv/bin/python main.py` |
-| Regenerate the dossier bibliography | `.venv/bin/python notes/survey/build.py` |
 
-No test suite or linter is configured yet. When one is added, record its commands here.
+No test suite or linter is configured yet.
 
 ## Structure
 
-- `notes/` holds thinking artifacts: surveys, design docs, experiment logs. Code never imports from `notes/`.
-- `notes/survey/papers.yaml` is the single source of truth for the bibliography. `build.py` rewrites `dossier.md` from the section 7 heading to the end of the file. Never hand-edit generated regions; they carry a GENERATED comment.
-- Planned code layout: one core package for shared logic; `experiments/` and `scripts/` import from it. One top-level CLI entry point dispatches subcommands; configs are dataclasses.
-- Run outputs: everything for one run lives under a single `outputs/<slug>-<timestamp>/` directory (checkpoints, logs, archived launch command). No top-level `logs/`. `outputs/` is gitignored.
+- `notes/final/` is the only reading contract: documents a maintainer has reviewed and approved for others. Promotion into `final/` is a human act after reading the document; agents never move files there. A promotion moves the document alone (move, never copy) and repoints any generator at the new path.
+- `notes/work/` holds everything else, with no guarantees: drafts pending review, generators and their source data, raw machine outputs. Enter only when hunting for context. Documents in `final/` stay current: they are updated in place as facts change, with history in git.
+- Generated content carries a GENERATED comment naming its source file and tool. Edit the source and rerun the tool; never hand-edit the output. Each generator documents itself where it lives.
+- Run outputs: everything for one run lives under a single `outputs/<slug>-<timestamp>/` directory (checkpoints, logs, archived launch command).
 
 ## Code
 
-- The core package is the single source of truth. Experiments and scripts import from it; they never copy it.
+- One core package is the single source of truth; `experiments/` and `scripts/` import from it, never copy it. One top-level CLI entry point dispatches subcommands; configs are dataclasses.
 - Never duplicate code. Before writing a function, check whether the core package already provides it or can be extended. When an experiment needs different behavior, add a config option or hook to core instead of forking it.
-- Keep modules small and single-purpose. Factor shared logic up into core the moment a second caller appears.
+- Factor shared logic up into core the moment a second caller appears.
 - Comments state constraints and invariants the code cannot express. No narration of changes, nothing that goes stale.
 
 ## Conventions
