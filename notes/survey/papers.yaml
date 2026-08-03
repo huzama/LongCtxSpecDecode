@@ -1,0 +1,883 @@
+# Single source of truth for the survey bibliography.
+# Edit this file, then run `python3 build.py` to regenerate bibliography.md
+# and the dossier's family index. Never edit those outputs by hand.
+#
+# Fields: name, arxiv (or url), year, venue (optional), family (key below),
+#   summary, lossless (true/false/"~"/omit), max_ctx (max context evaluated),
+#   acceptance, speedup, note (long-context behavior / caveat).
+# "~" lossless = conditional (lossy mode, or lossless w.r.t. a modified target).
+
+title: "Long-Context Speculative Decoding: Annotated Bibliography"
+
+preamble: |
+  *Reference material — do not read linearly. Each family opens with its verdict;
+  that is the takeaway. Pull individual papers only when a gap or experiment needs them.*
+
+  **Two regimes with opposite physics.** Short-context decoding is weight-bound
+  (EAGLE-3/DFlash arms race, 5–7x). Long-context decoding is KV-bound for MHA/GQA,
+  where short-trained heads go *sub-1x*. Every family verdict is relative to the
+  32K–1M input / long-generation regime. Acceptance cells use α = rate, τ = accepted
+  length (tokens/round) — they are not comparable across papers without the qualifiers.
+
+families:
+  - key: independent
+    name: "Independent AR drafters"
+    verdict: "☠️ Dead at long context — GQA floors drafter KV (speedup ceiling ~1.1x) and acceptance collapses by 8–16K."
+  - key: draft-heads
+    name: "Draft heads (Medusa / EAGLE / MTP)"
+    verdict: "❌ Die beyond the trained window unless drafter state is O(1) or norm-fixed; trained-short is the failure, not the head architecture."
+  - key: layer-skip
+    name: "Self-speculation: layer skip"
+    verdict: "🪦 Capped at ~1.0–1.5x — cost ratio is context-invariant, so it cannot touch the KV term that dominates 128K+. Secondary multiplier at best."
+  - key: early-exit
+    name: "Early exit"
+    verdict: "❓ Zero long-context evidence anywhere; structurally 1M-friendly (shared exit-layer KV) but unmeasured past 16K and no 128K training recipe exists."
+  - key: sparse-kv
+    name: "Sparse-KV drafting"
+    verdict: "✅ The converged recipe — survives and strengthens with context and batch. Constraints: selection must be attention-retrieval not eviction; budget likely grows with S; verification becomes the bottleneck."
+  - key: kv-compression
+    name: "KV-compression drafting"
+    verdict: "✅ Strongest acceptance-vs-length results in the literature; the 128K high-water marks live here or adjacent."
+  - key: sparse-verify
+    name: "Sparse / partial verification"
+    verdict: "🔥 The 2026 frontier — attacks the true bottleneck (verify KV bytes = 85–95% of round time) but silently abandons the target distribution. No divergence certificates exist."
+  - key: retrieval
+    name: "Retrieval / n-gram / suffix drafting"
+    verdict: "✅ Only family trivially length-robust on the draft side (zero drafter KV); beats trained heads at 4–64K in third-party evals; task-dependent; unmeasured past 64K."
+  - key: diffusion
+    name: "Block-diffusion drafters"
+    verdict: "⚠️ SOTA short-context drafting; decays hard by 32K zero-shot; bidirectional attention over long prompts is quadratic and unanalyzed; nothing past 32K."
+  - key: tree-theory
+    name: "Tree speculation & theory"
+    verdict: "📐 No theory anywhere has a context-length axis; the log(P) acceptance ceiling kills giant trees; optimal tree-vs-context is unsolved."
+  - key: serving
+    name: "Serving systems & runtime control"
+    verdict: "🏭 The engines serving 128K–1M cannot compose the needed features (no dynamic trees on MLA/SWA in TRT-LLM; vLLM PP+SD gaps); gains compress to 1.4–2.0x at production concurrency."
+  - key: ssm-hybrid
+    name: "SSM / linear / hybrid drafters & targets, cross-tokenizer"
+    verdict: "🕳️ The O(1)-state drafters that should dominate at 128K have never been measured there; sequential-hybrid targets are effectively un-draftable via component reuse (α=0.038)."
+
+papers:
+  # ---------------- independent ----------------
+  - name: "Speculative Decoding (Leviathan et al.)"
+    arxiv: "2211.17192"
+    year: 2023
+    venue: "ICML'23"
+    family: independent
+    summary: "Original draft-then-verify with rejection sampling; introduced α, γ and the speedup formula"
+    lossless: true
+    max_ctx: "<2K"
+    speedup: "2–3.4x vs AR (T5-XXL)"
+    note: "Drafter carries full growing KV; no KV-bound analysis"
+  - name: "Speculative Sampling (Chen et al.)"
+    arxiv: "2302.01318"
+    year: 2023
+    venue: "DeepMind"
+    family: independent
+    summary: "Concurrent discovery; modified rejection sampling; 4B drafter for Chinchilla-70B"
+    lossless: true
+    max_ctx: "<2K"
+    speedup: "2–2.5x vs AR (Chinchilla-70B)"
+    note: "No long-context analysis"
+
+  # ---------------- draft-heads ----------------
+  - name: "Medusa"
+    arxiv: "2401.10774"
+    year: 2024
+    venue: "ICML'24"
+    family: draft-heads
+    summary: "Parallel FFN heads off last hidden state + tree attention; optional lossy typical acceptance"
+    lossless: "~"
+    max_ctx: "<4K"
+    speedup: "2.2–3.6x vs AR"
+    note: "Constant drafter memory, but acceptance degrades on long inputs"
+  - name: "EAGLE"
+    arxiv: "2401.15077"
+    year: 2024
+    venue: "ICML'24"
+    family: draft-heads
+    summary: "Feature-level AR head with token-shift disambiguation; static draft tree"
+    lossless: true
+    max_ctx: "<4K"
+    speedup: "2.7–3.5x vs AR"
+    note: "Head keeps its own growing feature-KV; acceptance collapses past trained window"
+  - name: "EAGLE-2"
+    arxiv: "2406.16858"
+    year: 2024
+    venue: "EMNLP'24"
+    family: draft-heads
+    summary: "Confidence-calibrated dynamic draft trees (drafter confidence ≈ acceptance)"
+    lossless: true
+    max_ctx: "<4K"
+    acceptance: "τ4–5.5 (short ctx)"
+    speedup: "3.05–4.26x vs AR"
+    note: "Sub-1.0x at batch ~24 in SGLang; long-context decay inherited from EAGLE-1"
+  - name: "EAGLE-3"
+    arxiv: "2503.01840"
+    year: 2025
+    venue: "NeurIPS'25"
+    family: draft-heads
+    summary: "Direct token prediction + multi-layer feature fusion; production default in vLLM/SGLang/TRT-LLM"
+    lossless: true
+    max_ctx: "64K (via OWL)"
+    acceptance: "τ1.28 @4–64K (OWL)"
+    speedup: "≤6.5x short ctx; 0.81x long ctx"
+    note: "Long context is its known failure mode; +38% throughput at batch 64 short-ctx"
+  - name: "EAGLE 3.1"
+    url: "https://vllm.ai/blog/2026-05-26-eagle-3-1"
+    year: 2026
+    venue: "vLLM blog"
+    family: draft-heads
+    summary: "FC/post-norm fixes for attention drift at deep speculation"
+    lossless: true
+    max_ctx: "32K"
+    acceptance: "~2x AL vs EAGLE-3 (long ctx)"
+    speedup: "2.03x @c=1 → 1.66x @c=16"
+    note: "No acceptance-vs-context curve past 32K"
+  - name: "P-EAGLE"
+    arxiv: "2602.01469"
+    year: 2026
+    venue: "vLLM"
+    family: draft-heads
+    summary: "Single-pass parallel drafting (K=7)"
+    lossless: true
+    speedup: "1.69x over EAGLE-3; +55–69% @c=1 → +5–25% @c=64"
+    note: "Gains compress with concurrency"
+  - name: "OWL"
+    arxiv: "2510.07535"
+    year: 2025
+    venue: "Snowflake"
+    family: draft-heads
+    summary: "O(1)-state LSTM drafter off final hidden state + [SPEC] token; hybrid tree/non-tree"
+    lossless: true
+    max_ctx: "100K+"
+    acceptance: "τ4.00–4.27; HOWL hybrid τ6.14"
+    speedup: "2.35x (HOWL 3.08x) on Llama-3.3-70B"
+    note: "Introduces LongSpecBench; acceptance ~length-independent by construction"
+  - name: "Attention Drift"
+    arxiv: "2605.09992"
+    year: 2026
+    family: draft-heads
+    summary: "Diagnoses drafter hidden-state magnitude growth pulling attention off the prompt; post-norm fix"
+    lossless: true
+    speedup: "1.18x on long-context tasks"
+    note: "Norm fix transfers across head-based drafters"
+  - name: "DeepSeek-V3 MTP"
+    arxiv: "2412.19437"
+    year: 2024
+    family: draft-heads
+    summary: "Weight-amortizing multi-token-prediction head, shipped in 128K production"
+    lossless: true
+    max_ctx: "128K (production)"
+    acceptance: "85–90% second-token"
+    speedup: "1.8x TPS"
+    note: "No acceptance-vs-length breakdown ever published"
+  - name: "Windowed-MTP"
+    arxiv: "2607.21535"
+    year: 2026
+    family: draft-heads
+    summary: "Sink + constant window KV for MTP heads (~99% draft KV dropped)"
+    lossless: true
+    max_ctx: "1M"
+    acceptance: "matched vs full-KV MTP @1M"
+    note: "Lone 1M draft-KV datapoint; deflates 'budget must grow' stories for MTP heads"
+
+  # ---------------- layer-skip ----------------
+  - name: "Draft & Verify"
+    arxiv: "2309.08168"
+    year: 2024
+    venue: "ACL'24"
+    family: layer-skip
+    summary: "Bayesian-optimized static skipped-layer set; zero extra params or memory"
+    lossless: true
+    max_ctx: "<4K"
+    acceptance: "~92% α"
+    speedup: "≤1.99x"
+    note: "Drafting still attends full KV — cost ratio context-invariant"
+  - name: "SWIFT"
+    arxiv: "2410.06916"
+    year: 2025
+    venue: "ICLR'25"
+    family: layer-skip
+    summary: "Plug-and-play online discovery of the optimal skipped-layer set per input stream"
+    lossless: true
+    max_ctx: "16K (via KnapSpec)"
+    acceptance: "98–100% token accept"
+    speedup: "1.3–1.6x; 1.33x @16K"
+  - name: "CLaSp"
+    arxiv: "2505.24196"
+    year: 2025
+    family: layer-skip
+    summary: "In-context dynamic layer skip via per-step DP"
+    lossless: true
+    max_ctx: "16K (via KnapSpec)"
+    speedup: "1.24–1.73x; 1.22x @16K"
+    note: "Dynamic ≠ better — below static SWIFT at 16K"
+  - name: "DEL"
+    arxiv: "2504.05598"
+    year: 2025
+    family: layer-skip
+    summary: "Dynamic exit-layer and draft-length selection"
+    lossless: true
+    speedup: "2.16–2.62x"
+    note: "'Fails to provide acceleration' on base models (KnapSpec)"
+  - name: "CAS-Spec"
+    arxiv: "2510.26843"
+    year: 2025
+    family: layer-skip
+    summary: "Cascaded adaptive self-speculation"
+    lossless: true
+    speedup: "1.1–2.3x"
+  - name: "DVI"
+    arxiv: "2510.05421"
+    year: 2025
+    family: layer-skip
+    summary: "Online drafter learning during inference"
+    lossless: true
+    speedup: "2.16x"
+  - name: "KnapSpec"
+    arxiv: "2602.20217"
+    year: 2026
+    venue: "ICML'26"
+    family: layer-skip
+    summary: "0/1 knapsack over attention/MLP sublayers with context-dependent latency model; cosine acceptance proxy (0.837 corr.)"
+    lossless: true
+    max_ctx: "16K"
+    speedup: "1.47x peak @~16K"
+    note: "First context-dependent skip selection; still confirms the ~1.5x family cap"
+  - name: "AdaSkip"
+    arxiv: "2501.02336"
+    year: 2025
+    family: layer-skip
+    summary: "Adaptive sublayer skipping for long-context inference"
+    lossless: true
+    note: "Skip-selection ingredient for gap #13"
+  - name: "Layer-redundancy analysis"
+    arxiv: "2603.23701"
+    year: 2026
+    family: layer-skip
+    summary: "Modern pretraining reduces layer redundancy — shrinking skip/exit headroom"
+    note: "Analysis, not a method; threat to the whole family"
+
+  # ---------------- early-exit ----------------
+  - name: "LayerSkip"
+    arxiv: "2404.16710"
+    year: 2024
+    venue: "ACL'24, Meta"
+    family: early-exit
+    summary: "Layer-dropout + early-exit-loss training; draft shares exit-layer KV — zero drafter memory"
+    lossless: true
+    max_ctx: "<4K"
+    speedup: "1.82–2.16x"
+    note: "Structurally the most 1M-friendly design; no 128K-recipe checkpoint exists"
+  - name: "Kangaroo"
+    arxiv: "2404.18911"
+    year: 2024
+    family: early-exit
+    summary: "Fixed shallow sub-network + adapter with double early exit"
+    lossless: true
+    max_ctx: "<4K"
+    speedup: "2.04x"
+  - name: "EESD"
+    arxiv: "2406.03853"
+    year: 2024
+    family: early-exit
+    summary: "Early-exit drafting with Thompson-sampling draft length"
+    lossless: true
+    speedup: "2.29x (70B GSM8K)"
+  - name: "PPSD"
+    arxiv: "2509.19368"
+    year: 2025
+    family: early-exit
+    summary: "Verify-while-draft pipelining across exit points"
+    lossless: true
+    speedup: "2.01–3.81x"
+  - name: "Mirror-SD"
+    arxiv: "2510.13161"
+    year: 2025
+    venue: "Apple"
+    family: early-exit
+    summary: "Bidirectional early-exit speculation across heterogeneous accelerators"
+    lossless: true
+    speedup: "2.8–5.8x; +30% over EAGLE-3"
+    note: "Strongest early-exit numbers — entirely short-context"
+
+  # ---------------- sparse-kv ----------------
+  - name: "TriForce"
+    arxiv: "2404.11912"
+    year: 2024
+    venue: "COLM'24"
+    family: sparse-kv
+    summary: "Target self-drafts on retrieval-KV (~4K budget), full-KV lossless verify; hierarchical with tiny drafter below"
+    lossless: true
+    max_ctx: "122K"
+    acceptance: "0.96–0.99 α @120K"
+    speedup: "2.31x @122K (A100); 7.78x offloaded"
+    note: "Canonical 128K result; eviction baselines collapse (α 0.05–0.07 on needle); staleness grows with generation; α ~0.29 @T=1.0"
+  - name: "MagicDec"
+    arxiv: "2408.11049"
+    year: 2025
+    venue: "ICLR'25"
+    family: sparse-kv
+    summary: "StreamingLLM/SnapKV-cache drafter + (batch, seqlen) regime analysis: speedup grows with batch beyond S_inflection"
+    lossless: true
+    max_ctx: "100K"
+    acceptance: "0.84 α @4K → 0.79 α @100K"
+    speedup: "up to 2.51x @batch 32–256"
+    note: "SnapKV > StreamingLLM selection; GQA raises S_inflection (MHA 2.0x vs GQA 1.84x @32K)"
+  - name: "LongSpec"
+    arxiv: "2502.17421"
+    year: 2025
+    venue: "ACL"
+    family: sparse-kv
+    summary: "Constant 512-token drafter window + cross-attention into the target's KV (zero duplicate storage); Anchor-Offset positions; hybrid tree attention"
+    lossless: true
+    max_ctx: "32K"
+    speedup: "3.26x; 2.25–2.34x AIME24/QwQ"
+    note: "Degrades at 25–32K"
+  - name: "SpecExtend"
+    arxiv: "2505.20776"
+    year: 2025
+    family: sparse-kv
+    summary: "Training-free retrofit: target attention selects the drafter's KV"
+    lossless: true
+    max_ctx: "16K"
+    acceptance: "vanilla-SD baseline τ0.5–0.6 @16K (measured)"
+    speedup: "2.65–3.21x @16K (from 1.38–1.61x)"
+  - name: "Vegas"
+    arxiv: "2602.07223"
+    year: 2026
+    venue: "ICML'26"
+    family: sparse-kv
+    summary: "Verification attention recycled as the drafting mask — zero selection cost"
+    lossless: true
+    max_ctx: "120K"
+    acceptance: "τ~6.1/7 @7% sparsity"
+    speedup: "1.25–2.81x vs vLLM; 1.15–1.29x vs sparse SOTA"
+    note: "Longest self-spec evaluation published (96–120K); warns fixed budgets fail at extreme scale"
+  - name: "SparseSpec (PillarAttn)"
+    arxiv: "2512.01278"
+    year: 2026
+    venue: "MLSys'26"
+    family: sparse-kv
+    summary: "Only serving-grade self-spec (batch 256, TP); dynamic pillar-token selection"
+    lossless: true
+    acceptance: "6.16/8 accepted on reasoning CoT (EAGLE-3/n-gram <2)"
+    speedup: "2.13x vs vLLM; 1.36x vs MagicDec; 1.76x vs TriForce"
+    note: "Static budgets fail on shifting saliency; k=8 fixed with no staleness ablation"
+  - name: "SparseSpec-L"
+    arxiv: "2607.27735"
+    year: 2026
+    family: sparse-kv
+    summary: "Training-free recallable eviction — dense KV retained off the hot path"
+    lossless: true
+    max_ctx: "64K"
+    acceptance: "52–84.6% α"
+    speedup: "2.79x @~10% KV ratio"
+    note: "Single-A40 cap; 128-token generations only"
+  - name: "BudgetDraft"
+    arxiv: "2606.00144"
+    year: 2026
+    family: sparse-kv
+    summary: "Multi-view budget training for budget-robust sparse drafters"
+    lossless: true
+    max_ctx: "16K"
+    acceptance: "91.6% α @4K → ~18% α @16K"
+    speedup: "6.55x / 4.46x / 2.10x @4K/8K/16K"
+    note: "Budget-robust ≠ length-robust; drafter's native 2048 position range is the suspected artifact (gap #7)"
+  - name: "SPIRe"
+    arxiv: "2504.06419"
+    year: 2025
+    family: sparse-kv
+    summary: "Sparse-KV self-spec variant"
+    lossless: true
+    speedup: "+35% over MagicDec-style (modeled)"
+    note: "Modeled, not measured"
+  - name: "KVShot"
+    arxiv: "2604.26412"
+    year: 2026
+    family: sparse-kv
+    summary: "Drafter reads target KV to rescue long-range acceptance"
+    lossless: true
+    acceptance: "improves long-range acceptance"
+    speedup: "marginal e2e"
+    note: "Shallow drafters can't estimate target queries; sparse gradients; block-wise training contested"
+
+  # ---------------- kv-compression ----------------
+  - name: "QuantSpec"
+    arxiv: "2502.10424"
+    year: 2025
+    venue: "ICML'25"
+    family: kv-compression
+    summary: "Self-spec with hierarchical INT4/INT8 shared quantized KV + 4-bit weights"
+    lossless: true
+    max_ctx: "128K"
+    acceptance: "91.6% α @16K → 94.3% α @128K (rises with length)"
+    speedup: "1.35x @4K → 2.49x @128K"
+    note: "Quantized beats sparse drafter KV for draft-target agreement"
+  - name: "VeriCache"
+    arxiv: "2605.17613"
+    year: 2026
+    family: kv-compression
+    summary: "Same model drafts on compressed KV; full-KV verify off-GPU, overlapped with PCIe"
+    lossless: true
+    max_ctx: "500K–1M (~327GB KV @1M)"
+    acceptance: "25–40 accepted tokens/round (small drafters: 2–3)"
+    speedup: "4x throughput, bit-identical"
+    note: "Measures KL(compressed‖full) growing ~linearly (~6 nats/250 steps @KVzip 4x) — why unverified lossy KV fails"
+  - name: "SpecKV-γ"
+    arxiv: "2605.02888"
+    year: 2026
+    family: kv-compression
+    summary: "Optimal draft length shifts with weight precision (FP16: 2–4; INT8: 6–8; NF4: 4–6)"
+    lossless: true
+    acceptance: "~0.70 α across precisions"
+    speedup: "+56% over fixed γ=4"
+    note: "Explicitly flags KV-quant x SD interaction as unstudied (gap #4)"
+  - name: "Lynx"
+    arxiv: "2607.01831"
+    year: 2026
+    family: kv-compression
+    summary: "Bit-plane KV-transfer speculation"
+    lossless: true
+    speedup: "1.43x TTFT"
+  - name: "MLA-drafter conversion"
+    arxiv: "2607.27269"
+    year: 2026
+    family: kv-compression
+    summary: "MLA-converting drafters break acceptance via attention-function error; calibration fixes 37/64 cells"
+    lossless: true
+
+  # ---------------- sparse-verify ----------------
+  - name: "Dustin"
+    arxiv: "2606.24957"
+    year: 2026
+    venue: "ICML'26"
+    family: sparse-verify
+    summary: "Draft-lookahead + target attention history select the verification-KV subset"
+    lossless: false
+    max_ctx: "32K"
+    speedup: "27.85x self-attention; 9.17x e2e (Qwen2.5-72B @32K)"
+    note: "'Negligible' quality loss is uncertified"
+  - name: "SpecPV"
+    arxiv: "2512.02337"
+    year: 2025
+    family: sparse-verify
+    summary: "Partial-KV verification + periodic full refresh (draft module is EAGLE-3)"
+    lossless: false
+    max_ctx: "60K"
+    speedup: "2.88x @10K → 6.29x @60K"
+    note: "GovReport ROUGE-L 77.3 → 56.1 (−27%) at 2K budget — loss is task-dependent and unbounded"
+  - name: "SSV / SpecSA"
+    arxiv: "2605.19893"
+    year: 2026
+    family: sparse-verify
+    summary: "Speculation for natively-sparse (NSA) targets"
+    lossless: "~"
+    speedup: "3.49x vs AR-NSA; 6.86x kernel"
+    note: "Lossless w.r.t. the sparse target — a different contract"
+  - name: "Sparse verification (attn+FFN+MoE)"
+    arxiv: "2512.21911"
+    year: 2025
+    family: sparse-verify
+    summary: "Sparsifies attention, FFN, and MoE in the verify pass; claims stable acceptance"
+    lossless: false
+    max_ctx: "32K"
+    note: "Quality claims empirical only"
+  - name: "Sparse-verification failure taxonomy"
+    arxiv: "2607.26627"
+    year: 2026
+    family: sparse-verify
+    summary: "Taxonomy of where sparse verification fails"
+    note: "No control mechanism — motivates certification (gap #2) and triggering (gap #6)"
+
+  # ---------------- retrieval ----------------
+  - name: "PLD (Prompt Lookup Decoding)"
+    url: "https://github.com/apoorvumang/prompt-lookup-decoding"
+    year: 2023
+    family: retrieval
+    summary: "N-gram match into the prompt as free drafts"
+    lossless: true
+    max_ctx: "length-agnostic"
+    acceptance: "τ2.75 (OWL third-party eval)"
+    speedup: "2–4x on grounded tasks"
+    note: "Improves with more copyable context; trivially 1M-safe; in vLLM"
+  - name: "REST"
+    arxiv: "2311.08252"
+    year: 2024
+    venue: "NAACL'24"
+    family: retrieval
+    summary: "Retrieval from an external datastore as drafts"
+    lossless: true
+    speedup: "1.62–2.36x"
+  - name: "SuffixDecoding"
+    arxiv: "2411.04975"
+    year: 2025
+    venue: "NeurIPS'25 Spotlight"
+    family: retrieval
+    summary: "Suffix automaton over prompt + history; ~10.75 bytes/token CPU-RAM state"
+    lossless: true
+    acceptance: "τ3.41 (OWL eval)"
+    speedup: "5.3x AgenticSQL; 2.8x vs EAGLE-2/3"
+    note: "Shipped in vLLM"
+  - name: "Token Recycling"
+    arxiv: "2408.08696"
+    year: 2024
+    family: retrieval
+    summary: "Recycles candidate tokens from earlier verify steps; <2MB state"
+    lossless: true
+    acceptance: "τ3.16 (OWL eval)"
+    speedup: "~2x"
+  - name: "SAM-Decoding"
+    arxiv: "2411.10666"
+    year: 2024
+    family: retrieval
+    summary: "O(1) suffix-automaton matching"
+    lossless: true
+    max_ctx: "64K (OWL eval)"
+    acceptance: "τ3.18; SAMD+TR hybrid τ4.98 @4–64K"
+    note: "Beats EAGLE-3 (τ1.28) on long grounded inputs — the embarrassing cheap baseline"
+  - name: "AdaPLD"
+    arxiv: "2606.05742"
+    year: 2026
+    family: retrieval
+    summary: "Adaptive prompt-lookup"
+    lossless: true
+    speedup: "3.10x"
+  - name: "DReSD"
+    arxiv: "2502.15572"
+    year: 2025
+    family: retrieval
+    summary: "Dense (semantic) retrieval drafting instead of exact n-gram match"
+    lossless: true
+    acceptance: "+87% vs sparse retrieval"
+    speedup: "≤4.64x"
+    note: "External corpus only"
+  - name: "RAPID"
+    arxiv: "2502.20330"
+    year: 2025
+    venue: "ICML'25"
+    family: retrieval
+    summary: "RAG drafter — even larger than the target; upward speculation"
+    lossless: "~"
+    max_ctx: "120K"
+    speedup: "2.10–2.69x @120K"
+    note: "Quality-improving (InfiniteBench 42.83 → 49.98), so not distribution-preserving; >1x only beyond ~32K"
+  - name: "TokenSwift"
+    arxiv: "2502.18890"
+    year: 2025
+    family: retrieval
+    summary: "Accelerates 100K-token generation (long output, not input)"
+    lossless: true
+    max_ctx: "100K generated"
+    speedup: ">3x (5h → 90min)"
+
+  # ---------------- diffusion ----------------
+  - name: "DFlash"
+    arxiv: "2602.06036"
+    year: 2026
+    venue: "ICML'26"
+    family: diffusion
+    summary: "16-token block-diffusion draft per forward pass, conditioned on target features"
+    lossless: true
+    max_ctx: "32K"
+    acceptance: "τ4.9–5.3 @1K → τ2.09 @32K zero-shot; τ3.56 @32K after 1.6K-sample LongAlign FT"
+    speedup: ">6x; 2.5x vs EAGLE-3"
+    note: "Only diffusion context curve; is length-robustness a data patch or architectural limit?"
+  - name: "SpecDiff-2"
+    arxiv: "2511.00606"
+    year: 2025
+    venue: "MLSys'26 oral"
+    family: diffusion
+    summary: "Diffusion drafting, second generation"
+    lossless: true
+    speedup: "5.5x"
+  - name: "FailFast"
+    arxiv: "2512.20573"
+    year: 2025
+    family: diffusion
+    summary: "Length-adaptive diffusion speculation (dLLM cost ~length-independent)"
+    lossless: true
+    acceptance: "70-token accepts"
+    speedup: "4.9x"
+  - name: "Graft"
+    arxiv: "2605.20104"
+    year: 2026
+    family: diffusion
+    summary: "Hybrid tree construction: draft less, retrieve more"
+    lossless: true
+    speedup: "5.41x; +21.8% vs EAGLE-3 (Qwen3-235B)"
+  - name: "Spec-AUF"
+    arxiv: "2607.01893"
+    year: 2026
+    family: diffusion
+    summary: "Diffusion drafting variant"
+    lossless: true
+  - name: "DeLS-Spec"
+    arxiv: "2607.07409"
+    year: 2026
+    family: diffusion
+    summary: "Diffusion drafting variant"
+    lossless: true
+
+  # ---------------- tree-theory ----------------
+  - name: "SpecInfer"
+    arxiv: "2305.09781"
+    year: 2023
+    venue: "ASPLOS'24"
+    family: tree-theory
+    summary: "Token-tree speculation with tree verification"
+    lossless: true
+  - name: "Sequoia"
+    arxiv: "2402.12374"
+    year: 2024
+    family: tree-theory
+    summary: "Hardware-aware DP-optimal tree shape"
+    lossless: true
+    speedup: "4.04x"
+    note: "No context axis in the DP"
+  - name: "SpecExec"
+    arxiv: "2406.02532"
+    year: 2024
+    family: tree-theory
+    summary: "Massive parallel speculation for offloaded inference"
+    lossless: true
+    speedup: "10–18x offloaded"
+  - name: "DeFT"
+    arxiv: "2404.00242"
+    year: 2025
+    venue: "ICLR'25"
+    family: tree-theory
+    summary: "Flash tree attention on paged KV"
+    lossless: true
+    speedup: "73–99% tree KV-IO cut"
+  - name: "SpecTr"
+    arxiv: "2310.15141"
+    year: 2023
+    venue: "NeurIPS'23"
+    family: tree-theory
+    summary: "Multi-draft selection as optimal transport; (1−1/e)-approximation guarantee"
+    lossless: true
+    speedup: "2.13x; 1.37x vs single-draft"
+  - name: "Markov-chain optimality"
+    arxiv: "2411.00841"
+    year: 2024
+    venue: "NeurIPS'24"
+    family: tree-theory
+    summary: "Optimal multi-draft SD via a Markov-chain view"
+    lossless: true
+  - name: "Block Verification"
+    arxiv: "2403.10444"
+    year: 2024
+    family: tree-theory
+    summary: "Jointly verify draft blocks instead of token-by-token"
+    lossless: true
+    speedup: "+5–8% free"
+  - name: "Multi-path block verification"
+    arxiv: "2602.16961"
+    year: 2026
+    family: tree-theory
+    summary: "Extends block verification to multiple paths"
+    lossless: true
+    speedup: "+30% block efficiency"
+  - name: "Multi-draft OT bound"
+    arxiv: "2502.18779"
+    year: 2025
+    family: tree-theory
+    summary: "Tight acceptance bound for multi-draft speculation"
+    lossless: true
+  - name: "SpecDec++"
+    arxiv: "2405.19715"
+    year: 2024
+    family: tree-theory
+    summary: "Draft-length choice as an optimal stopping problem"
+    lossless: true
+    speedup: "+7–11%"
+  - name: "BRW speed-of-light bound"
+    arxiv: "2512.11718"
+    year: 2025
+    venue: "EACL'26"
+    family: tree-theory
+    summary: "E[accepted/iter] ≤ (μ+μ₂)log(P)/μ² + O(1) — only logarithmic in verifier capacity"
+    lossless: true
+    note: "Tight vs EAGLE-3; kills giant trees; the informational ceiling behind kill-risk #1"
+  - name: "Acceptance level-set certificates"
+    arxiv: "2606.30265"
+    year: 2026
+    family: tree-theory
+    summary: "Certified acceptance regions for speculative decoding"
+    lossless: true
+    note: "No KV axis — composition target for gap #2"
+  - name: "MLA arithmetic intensity"
+    arxiv: "2507.15465"
+    year: 2025
+    family: tree-theory
+    summary: "MLA decode is >100x MHA arithmetic intensity — moves toward compute-bound"
+    note: "Why KV-centric spec decode doesn't transfer to MLA targets"
+  - name: "GLA kernels"
+    arxiv: "2505.21487"
+    year: 2025
+    family: tree-theory
+    summary: "Grouped latent attention kernels, 2x FlashMLA at q>1"
+    note: "Makes MLA verify-friendly — supports MTP-style speculation on MLA"
+
+  # ---------------- serving ----------------
+  - name: "SmartSpec / TurboSpec"
+    arxiv: "2406.14066"
+    year: 2024
+    family: serving
+    summary: "Goodput-driven speculation-length control"
+    lossless: true
+    speedup: "3.2x latency"
+    note: "Load-aware, not length-aware"
+  - name: "AdaServe"
+    arxiv: "2501.12162"
+    year: 2025
+    venue: "EuroSys'26"
+    family: serving
+    summary: "SLO-customized speculative serving"
+    lossless: true
+    speedup: "4.3x fewer SLO violations"
+  - name: "FASER"
+    arxiv: "2604.20503"
+    year: 2026
+    family: serving
+    summary: "Adaptive speculation in serving"
+    lossless: true
+    speedup: "+53% throughput"
+  - name: "Saguaro"
+    arxiv: "2603.03251"
+    year: 2026
+    venue: "ICLR'26"
+    family: serving
+    summary: "Overlap drafting with verification"
+    lossless: true
+    speedup: "~30%"
+  - name: "Batch SD Done Right"
+    arxiv: "2510.22876"
+    year: 2025
+    family: serving
+    summary: "Open-source batched SD was silently wrong (draft-distribution bonus tokens, corrupted KV alignment)"
+    note: "Correctness result — audit any batched baseline against it"
+  - name: "Meta production study"
+    arxiv: "2508.08192"
+    year: 2025
+    family: serving
+    summary: "Speculation at production concurrency"
+    lossless: true
+    speedup: "1.4–2.0x at production batch (vs 2–3x @bs=1)"
+    note: "The concurrency-compression datapoint"
+  - name: "DSpark"
+    arxiv: "2607.05147"
+    year: 2026
+    family: serving
+    summary: "DeepSeek-V4 speculative serving"
+    lossless: true
+    speedup: "+60–85% per-user at matched throughput"
+  - name: "TransKV"
+    url: "https://www.techrxiv.org/doi/full/10.36227/techrxiv.177101038.80960856/v1"
+    year: 2026
+    venue: "TechRxiv"
+    family: serving
+    summary: "Transactional KV: draft tokens stay in token-sized buffers until accepted, not block-granular pages"
+    lossless: true
+    speedup: "1.78x branch concurrency @B=16"
+    note: "Draft pages otherwise eat scheduler token budget"
+  - name: "ReSpec"
+    year: 2026
+    venue: "MLSys'26"
+    family: serving
+    summary: "Speculative decoding for RL rollouts"
+    lossless: true
+    speedup: "4.5x rollouts"
+  - name: "Consumer-hardware audit"
+    arxiv: "2607.17283"
+    year: 2026
+    family: serving
+    summary: "3/5 consumer configs decelerate under speculation on serialized backends"
+    note: "Speculation is not free off-datacenter"
+  - name: "BanditSpec"
+    arxiv: "2505.15141"
+    year: 2025
+    family: serving
+    summary: "Bandit selection of drafting configuration"
+    lossless: true
+    note: "Runtime-control prior art for gap #10"
+  - name: "Not-a-Bandit"
+    arxiv: "2510.20064"
+    year: 2025
+    family: serving
+    summary: "Full-information online draft selection"
+    lossless: true
+    note: "Runtime-control prior art for gap #10"
+  - name: "OnlineSpec"
+    arxiv: "2603.12617"
+    year: 2026
+    family: serving
+    summary: "Online speculation adaptation under drift"
+    lossless: true
+    note: "Runtime-control prior art for gap #10"
+
+  # ---------------- ssm-hybrid ----------------
+  - name: "Mamba Drafters"
+    arxiv: "2506.01206"
+    year: 2025
+    family: ssm-hybrid
+    summary: "Mamba drafter with O(1) state (52GB vs 72GB peak @8K)"
+    lossless: true
+    max_ctx: "8K"
+    acceptance: "τ2.80–2.87 vs EAGLE+YaRN τ2.64 @8K"
+    note: "Never measured past 8K — the regime O(1) state was built for (gap #11)"
+  - name: "ReDrafter"
+    arxiv: "2403.09919"
+    year: 2024
+    family: ssm-hybrid
+    summary: "RNN drafter with O(1) state and beam drafting"
+    lossless: true
+    speedup: "2.3–2.8x"
+  - name: "SpecLA"
+    arxiv: "2607.16673"
+    year: 2026
+    family: ssm-hybrid
+    summary: "Speculation for linear-attention targets"
+    lossless: true
+    speedup: "≤1.70x (recurrence serializes verification)"
+  - name: "Component-Aware SD"
+    arxiv: "2605.01106"
+    year: 2026
+    family: ssm-hybrid
+    summary: "Hybrid-target drafting via component reuse"
+    lossless: true
+    acceptance: "parallel hybrids α=0.68; sequential α=0.038 (18x gap)"
+    note: "Sequential hybrids effectively un-draftable via reuse; LayerSkip-style exit recovers ~12x (gap #9)"
+  - name: "ReplaySSM"
+    url: "https://github.com/vllm-project/vllm/issues/47572"
+    year: 2026
+    venue: "vLLM RFC"
+    family: ssm-hybrid
+    summary: "O(1) rollback for SSM speculation via input ring-buffer"
+    lossless: true
+    note: "Concurrent infrastructure — cite, don't claim (ate part of gap #9)"
+  - name: "Heterogeneous-vocab lossless SD"
+    arxiv: "2502.05202"
+    year: 2025
+    venue: "ICML'25 Oral"
+    family: ssm-hybrid
+    summary: "Lossless speculation across different tokenizers"
+    lossless: true
+    speedup: "2.8x incl. long-context tasks"
+    note: "No per-length breakdown"
+  - name: "TokenTiming"
+    arxiv: "2510.15545"
+    year: 2025
+    family: ssm-hybrid
+    summary: "Cross-tokenizer draft alignment"
+    lossless: true
+    speedup: "1.57x"
+  - name: "OmniDraft"
+    arxiv: "2507.02659"
+    year: 2025
+    family: ssm-hybrid
+    summary: "Universal drafter across targets"
+    lossless: true
+    speedup: "1.5–2x"
