@@ -14,8 +14,11 @@ Research codebase for long-context speculative decoding built on sparse attentio
 - Remote execution: each `ssh srv0X "..."` starts a fresh login shell in `$HOME`; the local cwd does not carry over. Resolve the repo root locally, then use it inside the quoted command (double quotes so the variable expands locally):
 
 ```bash
-REPO=$(git rev-parse --show-toplevel)   # must be under /shared to exist on the remote
-ssh srv0X "cd $REPO && CUDA_VISIBLE_DEVICES=0 $REPO/.venv/bin/python -m <module> <args>"
+# REPO = absolute path of this checkout, resolved locally by git.
+# Must be under /shared to exist on the remote. Run as ONE command:
+# shell variables do not survive across separate shell invocations.
+REPO=$(git rev-parse --show-toplevel) && \
+  ssh srv0X "cd $REPO && CUDA_VISIBLE_DEVICES=0 $REPO/.venv/bin/python -m <module> <args>"
 ```
 
 ## Commands
