@@ -1,47 +1,46 @@
 # Single source of truth for the survey bibliography.
 # Edit this file, then run build.py (with the repo venv interpreter) to
-# regenerate the bibliography section of dossier.md. Never edit that
-# generated section by hand.
+# regenerate bibliography.md. Never edit that generated file by hand.
 #
 # Fields: name, arxiv (or url), year, venue (optional), family (key below),
 #   summary, lossless (true/false/"~"/omit), max_ctx (max context evaluated),
 #   acceptance, speedup, note (long-context behavior / caveat).
 # "~" lossless = conditional (lossy mode, or lossless w.r.t. a modified target).
 
-title: "Long-Context Speculative Decoding: Annotated Bibliography"
+title: "Annotated Bibliography by Method Family"
 
 preamble: |
-  *Reference material — do not read linearly. Each family opens with its verdict;
-  that is the takeaway. Pull individual papers only when a gap or experiment needs them.*
+  *Reference material; do not read linearly. Each family opens with its verdict;
+  that is the takeaway. Pull individual papers only when an idea or experiment needs them.*
 
   **Two regimes with opposite physics.** Short-context decoding is weight-bound
   (EAGLE-3/DFlash arms race, 5–7x). Long-context decoding is KV-bound for MHA/GQA,
   where short-trained heads go *sub-1x*. Every family verdict is relative to the
   32K–1M input / long-generation regime. Acceptance cells use α = rate, τ = accepted
-  length (tokens/round) — they are not comparable across papers without the qualifiers.
+  length (tokens/round); they are not comparable across papers without the qualifiers.
 
 families:
   - key: independent
     name: "Independent AR drafters"
-    verdict: "☠️ Dead at long context — GQA floors drafter KV (speedup ceiling ~1.1x) and acceptance collapses by 8–16K."
+    verdict: "☠️ Dead at long context: GQA floors drafter KV (speedup ceiling ~1.1x) and acceptance collapses by 8–16K."
   - key: draft-heads
     name: "Draft heads (Medusa / EAGLE / MTP)"
     verdict: "❌ Die beyond the trained window unless drafter state is O(1) or norm-fixed; trained-short is the failure, not the head architecture."
   - key: layer-skip
     name: "Self-speculation: layer skip"
-    verdict: "🪦 Capped at ~1.0–1.5x — cost ratio is context-invariant, so it cannot touch the KV term that dominates 128K+. Secondary multiplier at best."
+    verdict: "🪦 Capped at ~1.0–1.5x: cost ratio is context-invariant, so it cannot touch the KV term that dominates 128K+. Secondary multiplier at best."
   - key: early-exit
     name: "Early exit"
     verdict: "❓ Zero long-context evidence anywhere; structurally 1M-friendly (shared exit-layer KV) but unmeasured past 16K and no 128K training recipe exists."
   - key: sparse-kv
     name: "Sparse-KV drafting"
-    verdict: "✅ The converged recipe — survives and strengthens with context and batch. Constraints: selection must be attention-retrieval not eviction; budget likely grows with S; verification becomes the bottleneck."
+    verdict: "✅ The converged recipe: survives and strengthens with context and batch. Constraints: selection must be attention-retrieval not eviction; budget likely grows with S; verification becomes the bottleneck."
   - key: kv-compression
     name: "KV-compression drafting"
     verdict: "✅ Strongest acceptance-vs-length results in the literature; the 128K high-water marks live here or adjacent."
   - key: sparse-verify
     name: "Sparse / partial verification"
-    verdict: "🔥 The 2026 frontier — attacks the true bottleneck (verify KV bytes = 85–95% of round time) but silently abandons the target distribution. No divergence certificates exist."
+    verdict: "🔥 The 2026 frontier: attacks the true bottleneck (verify KV bytes = 85–95% of round time) but silently abandons the target distribution. No divergence certificates exist."
   - key: retrieval
     name: "Retrieval / n-gram / suffix drafting"
     verdict: "✅ Only family trivially length-robust on the draft side (zero drafter KV); beats trained heads at 4–64K in third-party evals; task-dependent; unmeasured past 64K."
@@ -194,7 +193,7 @@ papers:
     max_ctx: "<4K"
     acceptance: "~92% α"
     speedup: "≤1.99x"
-    note: "Drafting still attends full KV — cost ratio context-invariant"
+    note: "Drafting still attends full KV; cost ratio context-invariant"
   - name: "SWIFT"
     arxiv: "2410.06916"
     year: 2025
@@ -213,7 +212,7 @@ papers:
     lossless: true
     max_ctx: "16K (via KnapSpec)"
     speedup: "1.24–1.73x; 1.22x @16K"
-    note: "Dynamic ≠ better — below static SWIFT at 16K"
+    note: "Dynamic ≠ better; below static SWIFT at 16K"
   - name: "DEL"
     arxiv: "2504.05598"
     year: 2025
@@ -252,12 +251,12 @@ papers:
     family: layer-skip
     summary: "Adaptive sublayer skipping for long-context inference"
     lossless: true
-    note: "Skip-selection ingredient for gap #13"
+    note: "Skip-selection ingredient for idea #13"
   - name: "Layer-redundancy analysis"
     arxiv: "2603.23701"
     year: 2026
     family: layer-skip
-    summary: "Modern pretraining reduces layer redundancy — shrinking skip/exit headroom"
+    summary: "Modern pretraining reduces layer redundancy, shrinking skip/exit headroom"
     note: "Analysis, not a method; threat to the whole family"
 
   # ---------------- early-exit ----------------
@@ -266,7 +265,7 @@ papers:
     year: 2024
     venue: "ACL'24, Meta"
     family: early-exit
-    summary: "Layer-dropout + early-exit-loss training; draft shares exit-layer KV — zero drafter memory"
+    summary: "Layer-dropout + early-exit-loss training; draft shares exit-layer KV, zero drafter memory"
     lossless: true
     max_ctx: "<4K"
     speedup: "1.82–2.16x"
@@ -301,7 +300,7 @@ papers:
     summary: "Bidirectional early-exit speculation across heterogeneous accelerators"
     lossless: true
     speedup: "2.8–5.8x; +30% over EAGLE-3"
-    note: "Strongest early-exit numbers — entirely short-context"
+    note: "Strongest early-exit numbers; entirely short-context"
 
   # ---------------- sparse-kv ----------------
   - name: "TriForce"
@@ -350,7 +349,7 @@ papers:
     year: 2026
     venue: "ICML'26"
     family: sparse-kv
-    summary: "Verification attention recycled as the drafting mask — zero selection cost"
+    summary: "Verification attention recycled as the drafting mask, zero selection cost"
     lossless: true
     max_ctx: "120K"
     acceptance: "τ~6.1/7 @7% sparsity"
@@ -370,7 +369,7 @@ papers:
     arxiv: "2607.27735"
     year: 2026
     family: sparse-kv
-    summary: "Training-free recallable eviction — dense KV retained off the hot path"
+    summary: "Training-free recallable eviction; dense KV retained off the hot path"
     lossless: true
     max_ctx: "64K"
     acceptance: "52–84.6% α"
@@ -385,7 +384,7 @@ papers:
     max_ctx: "16K"
     acceptance: "91.6% α @4K → ~18% α @16K"
     speedup: "6.55x / 4.46x / 2.10x @4K/8K/16K"
-    note: "Budget-robust ≠ length-robust; drafter's native 2048 position range is the suspected artifact (gap #7)"
+    note: "Budget-robust ≠ length-robust; drafter's native 2048 position range is the suspected artifact (idea #7)"
   - name: "SPIRe"
     arxiv: "2504.06419"
     year: 2025
@@ -425,7 +424,7 @@ papers:
     max_ctx: "500K–1M (~327GB KV @1M)"
     acceptance: "25–40 accepted tokens/round (small drafters: 2–3)"
     speedup: "4x throughput, bit-identical"
-    note: "Measures KL(compressed‖full) growing ~linearly (~6 nats/250 steps @KVzip 4x) — why unverified lossy KV fails"
+    note: "Measures KL(compressed‖full) growing ~linearly (~6 nats/250 steps @KVzip 4x); why unverified lossy KV fails"
   - name: "SpecKV-γ"
     arxiv: "2605.02888"
     year: 2026
@@ -434,7 +433,7 @@ papers:
     lossless: true
     acceptance: "~0.70 α across precisions"
     speedup: "+56% over fixed γ=4"
-    note: "Explicitly flags KV-quant x SD interaction as unstudied (gap #4)"
+    note: "Explicitly flags KV-quant x SD interaction as unstudied (idea #4)"
   - name: "Lynx"
     arxiv: "2607.01831"
     year: 2026
@@ -468,7 +467,7 @@ papers:
     lossless: false
     max_ctx: "60K"
     speedup: "2.88x @10K → 6.29x @60K"
-    note: "GovReport ROUGE-L 77.3 → 56.1 (−27%) at 2K budget — loss is task-dependent and unbounded"
+    note: "GovReport ROUGE-L 77.3 → 56.1 (−27%) at 2K budget; loss is task-dependent and unbounded"
   - name: "SSV / SpecSA"
     arxiv: "2605.19893"
     year: 2026
@@ -476,7 +475,7 @@ papers:
     summary: "Speculation for natively-sparse (NSA) targets"
     lossless: "~"
     speedup: "3.49x vs AR-NSA; 6.86x kernel"
-    note: "Lossless w.r.t. the sparse target — a different contract"
+    note: "Lossless w.r.t. the sparse target, a different contract"
   - name: "Sparse verification (attn+FFN+MoE)"
     arxiv: "2512.21911"
     year: 2025
@@ -490,7 +489,7 @@ papers:
     year: 2026
     family: sparse-verify
     summary: "Taxonomy of where sparse verification fails"
-    note: "No control mechanism — motivates certification (gap #2) and triggering (gap #6)"
+    note: "No control mechanism; motivates certification (idea #2) and triggering (idea #6)"
 
   # ---------------- retrieval ----------------
   - name: "PLD (Prompt Lookup Decoding)"
@@ -537,7 +536,7 @@ papers:
     lossless: true
     max_ctx: "64K (OWL eval)"
     acceptance: "τ3.18; SAMD+TR hybrid τ4.98 @4–64K"
-    note: "Beats EAGLE-3 (τ1.28) on long grounded inputs — the embarrassing cheap baseline"
+    note: "Beats EAGLE-3 (τ1.28) on long grounded inputs; the embarrassing cheap baseline"
   - name: "AdaPLD"
     arxiv: "2606.05742"
     year: 2026
@@ -559,7 +558,7 @@ papers:
     year: 2025
     venue: "ICML'25"
     family: retrieval
-    summary: "RAG drafter — even larger than the target; upward speculation"
+    summary: "RAG drafter, even larger than the target; upward speculation"
     lossless: "~"
     max_ctx: "120K"
     speedup: "2.10–2.69x @120K"
@@ -699,28 +698,28 @@ papers:
     year: 2025
     venue: "EACL'26"
     family: tree-theory
-    summary: "E[accepted/iter] ≤ (μ+μ₂)log(P)/μ² + O(1) — only logarithmic in verifier capacity"
+    summary: "E[accepted/iter] ≤ (μ+μ₂)log(P)/μ² + O(1); only logarithmic in verifier capacity"
     lossless: true
-    note: "Tight vs EAGLE-3; kills giant trees; the informational ceiling behind kill-risk #1"
+    note: "Tight vs EAGLE-3; kills giant trees; the informational ceiling behind risk #1 in ideas-kept.md"
   - name: "Acceptance level-set certificates"
     arxiv: "2606.30265"
     year: 2026
     family: tree-theory
     summary: "Certified acceptance regions for speculative decoding"
     lossless: true
-    note: "No KV axis — composition target for gap #2"
+    note: "No KV axis; composition target for idea #2"
   - name: "MLA arithmetic intensity"
     arxiv: "2507.15465"
     year: 2025
     family: tree-theory
-    summary: "MLA decode is >100x MHA arithmetic intensity — moves toward compute-bound"
+    summary: "MLA decode is >100x MHA arithmetic intensity; moves toward compute-bound"
     note: "Why KV-centric spec decode doesn't transfer to MLA targets"
   - name: "GLA kernels"
     arxiv: "2505.21487"
     year: 2025
     family: tree-theory
     summary: "Grouped latent attention kernels, 2x FlashMLA at q>1"
-    note: "Makes MLA verify-friendly — supports MTP-style speculation on MLA"
+    note: "Makes MLA verify-friendly; supports MTP-style speculation on MLA"
 
   # ---------------- serving ----------------
   - name: "SmartSpec / TurboSpec"
@@ -746,6 +745,14 @@ papers:
     summary: "Adaptive speculation in serving"
     lossless: true
     speedup: "+53% throughput"
+  - name: "Nightjar"
+    arxiv: "2512.22420"
+    year: 2025
+    venue: "J. Systems Architecture"
+    family: serving
+    summary: "Contextual-bandit speculation length under dynamic serving load"
+    lossless: true
+    note: "Runtime-control prior art for idea #8; drafter itself stays fixed"
   - name: "Saguaro"
     arxiv: "2603.03251"
     year: 2026
@@ -759,7 +766,7 @@ papers:
     year: 2025
     family: serving
     summary: "Open-source batched SD was silently wrong (draft-distribution bonus tokens, corrupted KV alignment)"
-    note: "Correctness result — audit any batched baseline against it"
+    note: "Correctness result; audit any batched baseline against it"
   - name: "Meta production study"
     arxiv: "2508.08192"
     year: 2025
@@ -803,21 +810,21 @@ papers:
     family: serving
     summary: "Bandit selection of drafting configuration"
     lossless: true
-    note: "Runtime-control prior art for gap #10"
+    note: "Runtime-control prior art for idea #10"
   - name: "Not-a-Bandit"
     arxiv: "2510.20064"
     year: 2025
     family: serving
     summary: "Full-information online draft selection"
     lossless: true
-    note: "Runtime-control prior art for gap #10"
+    note: "Runtime-control prior art for idea #10"
   - name: "OnlineSpec"
     arxiv: "2603.12617"
     year: 2026
     family: serving
     summary: "Online speculation adaptation under drift"
     lossless: true
-    note: "Runtime-control prior art for gap #10"
+    note: "Runtime-control prior art for idea #10"
 
   # ---------------- ssm-hybrid ----------------
   - name: "Mamba Drafters"
@@ -828,7 +835,7 @@ papers:
     lossless: true
     max_ctx: "8K"
     acceptance: "τ2.80–2.87 vs EAGLE+YaRN τ2.64 @8K"
-    note: "Never measured past 8K — the regime O(1) state was built for (gap #11)"
+    note: "Never measured past 8K; the regime O(1) state was built for (idea #11)"
   - name: "ReDrafter"
     arxiv: "2403.09919"
     year: 2024
@@ -850,7 +857,7 @@ papers:
     summary: "Hybrid-target drafting via component reuse"
     lossless: true
     acceptance: "parallel hybrids α=0.68; sequential α=0.038 (18x gap)"
-    note: "Sequential hybrids effectively un-draftable via reuse; LayerSkip-style exit recovers ~12x (gap #9)"
+    note: "Sequential hybrids effectively un-draftable via reuse; LayerSkip-style exit recovers ~12x (idea #9)"
   - name: "ReplaySSM"
     url: "https://github.com/vllm-project/vllm/issues/47572"
     year: 2026
@@ -858,7 +865,7 @@ papers:
     family: ssm-hybrid
     summary: "O(1) rollback for SSM speculation via input ring-buffer"
     lossless: true
-    note: "Concurrent infrastructure — cite, don't claim (ate part of gap #9)"
+    note: "Concurrent infrastructure: cite, don't claim (ate part of idea #9)"
   - name: "Heterogeneous-vocab lossless SD"
     arxiv: "2502.05202"
     year: 2025

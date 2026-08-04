@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Research codebase for long-context speculative decoding built on sparse attention. Currently pre-implementation: the literature survey and research direction live in `notes/`, and `main.py` is a placeholder. Before starting research code, read `notes/work/survey/dossier.md`, at minimum the TL;DR and section 2 (ranked gaps).
+Research codebase for long-context speculative decoding built on sparse attention. Currently pre-implementation: the literature survey and research direction live in `notes/`, and `main.py` is a placeholder. Before starting research code, read `notes/work/survey/README.md` and follow its reading order, at minimum `landscape.md` and `ideas-kept.md`.
 
 ## Environment
 
