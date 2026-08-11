@@ -1,18 +1,19 @@
 # Ideas: Kept
 
-Live bets. Evidence lives in [landscape.md](landscape.md); dead directions and the corrected starting hypotheses live in [ideas-rejected.md](ideas-rejected.md). IDs #1–#14 are stable across both files.
+Live bets. Evidence lives in [landscape.md](landscape.md); dead directions and the corrected starting hypotheses live in [ideas-rejected.md](ideas-rejected.md). IDs #0–#14 are stable across both files.
 
 **TL;DR**
-- Our bets: **#1** (both-sides-sparse via an external block-sparse oracle), **#2+#6** (certification + control of sparse verification), **#3+#4** (the measurement papers nobody has done, executable in weeks).
+- Our bets: **#0/#1** (both-sides-sparse via an external block-sparse oracle; #0 adds the early-exit depth axis), **#2+#6** (certification + control of sparse verification), **#3+#4** (the measurement papers nobody has done, executable in weeks).
 - Avoid pure drafting improvements (bottleneck moved to verification) and layer-skip framings (rejected, arithmetic-capped).
 - Every idea carries a falsifiable 2-week kill test. Run it: the idea graduates to active work or moves to rejected with data.
 
 ## 🚀 Menu
 
-Ranked by impact × tractability × fit for us (sparse attention; block-sparse selector method under review). Audit = how much is already published; [G*] in headings points into data/raw-data.json. Read #1–#4 in detail first.
+Ranked by impact × tractability × fit for us (sparse attention; block-sparse selector method under review). Audit = how much is already published; [G*] in headings points into data/raw-data.json. Read #0–#4 in detail first.
 
 | # | Idea | Audit | 2-week kill test |
 |---|---|---|---|
+| **0** | Early-exit both-sides-sparse: depth-profiled budgets, shared sparse prefix | open | α(k × budget) grid @32–64K; α usable at k=50% and α_comb ≥ α_exit·α_sparse |
 | **1** | Both-sides-sparse: sparse draft + sparse verify via external selector oracle | partially-solved | selector-restricted verify @12.5% budget; acceptance holds within ~5% → project lives |
 | **2** | Divergence certification: KV budget → output-distribution bound | open | attention-mass ↔ realized-KL correlation @32K; one strong plot validates the program |
 | **3** | Acceptance-vs-(budget, length) surface, 128K–1M | partially-solved | fit α(B, L) over {32K, 128K, 256K} × budgets; sublinear vs linear vs task-forked |
@@ -24,6 +25,14 @@ Ranked by impact × tractability × fit for us (sparse attention; block-sparse s
 | 9 | Self-speculation for sequential-hybrid / SSM targets | partially-solved | LayerSkip-style finetune on 0.5–1B hybrid; does α recover from 0.038? |
 | 10 | No-regret draft-path adaptation over 30K–100K generations | partially-solved | EXP3 budget selection on 13K-token AIME traces vs fixed |
 | 11 | SSM drafter acceptance past 8K | open | Mamba-130M + Llama-3.1-8B on LongSpecBench @128K vs OWL-LSTM |
+
+### #0 Early-exit both-sides-sparse: depth-profiled budgets over a shared sparse prefix
+- **Why #0**: sparse-KV self-drafting is weight-bound at batch 1 below S_inflection (≈400K for a GQA 32B; landscape, arithmetic #8): sparsity cannot touch the weight term, early exit divides it by the exit fraction. It is also the one drafting lever that transfers to MLA targets (arithmetic #9), our hedge against risk #2. Generalizes #1: full depth is the k=L special case.
+- **Design**: one selector, a depth-profiled budget B(layer), exit boundary k. Draft = sparse prefix + exit head on a frozen target (Kangaroo-style adapter). Verify = continue the deep layers, reusing the prefix compute and KV. Draft and verify must share the sparse pattern inside the prefix; "different sparsity" lives across depth, not between the two passes. Contract: lossless w.r.t. the sparse-prefix target (SSV precedent, [2605.19893](https://arxiv.org/abs/2605.19893)) or certified via #2.
+- **Not #12**: layer skip reruns skipped layers at verification and its cost ratio is context-invariant (rejected). Early exit shares the prefix, so draft work counts toward verification and only rejected tokens pay.
+- **Cite/beat**: LayerSkip ([2404.16710](https://arxiv.org/abs/2404.16710)), Kangaroo ([2404.18911](https://arxiv.org/abs/2404.18911)), Mirror-SD ([2510.13161](https://arxiv.org/abs/2510.13161)): all early exit, all ≤16K, all full attention; Vegas + Dustin via #1; [2603.23701](https://arxiv.org/abs/2603.23701) (layer-redundancy shrinkage, the headwind to beat); Component-Aware SD ([2605.01106](https://arxiv.org/abs/2605.01106), exit training recovers hybrids, idea #9's evidence).
+- **Risk**: early exit has zero published evidence past 16K anywhere (family verdict), and it is a batch-1 story first (risk #7): frame as local long context or show the weight saving below the batch ridge.
+- **2-week kill test**: Llama-3.1-8B + Kangaroo-style adapter at 32–64K; grid k ∈ {25%, 50%} × draft budget ∈ {full, 25%, 6%}. Gates: α at k=50% stays usable at 64K, and α_comb ≥ α_exit·α_sparse (the super-multiplicativity check inherited from #12's reopen test). Day-one calibration before any training: Meta's LayerSkip checkpoints at native context.
 
 ### #1 Both-sides-sparse: compose sparse drafting with sparse verification, breaking oracle circularity [G11]
 - **Why #1**: verification is 85–95% of round time (landscape, arithmetic #6), the only place large headroom remains; every verification-recycled drafter (Vegas/PillarAttn/SparseSpec-L) structurally *requires* full-KV verification for its signal. **Our block-sparse selector is a third-party importance oracle that does not need full verification attention: the exact missing piece.**

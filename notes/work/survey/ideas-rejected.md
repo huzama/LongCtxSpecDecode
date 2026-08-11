@@ -39,7 +39,7 @@ Kill reasons on record so no dead idea is re-litigated. IDs are shared with [ide
 
 | ID | Direction | Kill reason | Reopen / salvage |
 |---|---|---|---|
-| #12 | 2D (layer × KV-budget) knapsack drafter [G2] | Arithmetic: composition adds ~2% at B≥8/128K and acceptance multiplies *down* (landscape, arithmetic #7) | Only as batch-1, 512K–1M self-spec (+30–40% predicted); reopen test below |
+| #12 | 2D (layer × KV-budget) knapsack drafter [G2] | Arithmetic: composition adds ~2% at B≥8/128K and acceptance multiplies *down* (landscape, arithmetic #7) | Only as batch-1, 512K–1M self-spec (+30–40% predicted); reopen test below. The early-exit variant (shared prefix) is kept as idea #0 |
 | #13 | Layer-skip/early-exit acceptance curves 64K–1M + LayerSkip training at 128K [G1] | Ceiling ~1.5x (landscape, arithmetic #5): a measurement, not a project | As a measurement section inside another paper (e.g. #12's reopen test). Cite KnapSpec, AdaSkip ([2501.02336](https://arxiv.org/abs/2501.02336)), [2603.23701](https://arxiv.org/abs/2603.23701) (redundancy shrinking in modern checkpoints) |
 | #14 | Layer-skip self-spec under continuous batching [G5] | Serving-engineering project on a 1.5x-capped direction; SparseSpec deliberately routed around it | Only if #12's niche pans out |
 
