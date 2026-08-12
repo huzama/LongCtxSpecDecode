@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Research codebase for long-context speculative decoding built on sparse attention. Currently pre-implementation: the literature survey and research direction live in `notes/`, and `main.py` is a placeholder. Before starting research code, read `notes/work/survey/README.md` and follow its reading order, at minimum `landscape.md` and `ideas-kept.md`.
+Research codebase for long-context speculative decoding built on sparse attention. The literature survey and research direction live in `notes/`; the method design is `notes/work/exit-sparse-self-spec.md`. Code lives in `src/specdec` (one package, installed editable by `uv sync`) with experiments in `src/specdec/experiments`, and a single CLI (`main.py`). Before touching research code, read `notes/work/survey/README.md` and follow its reading order, at minimum `landscape.md` and `ideas-kept.md`.
 
 ## Environment
 
@@ -27,9 +27,18 @@ REPO=$(git rev-parse --show-toplevel) && \
 |---|---|
 | Sync environment (uv, Python 3.13) | `uv sync` |
 | Add a dependency | `uv add <package>` |
-| Run the entry point | `.venv/bin/python main.py` |
+| List subcommands and flags | `.venv/bin/python main.py --help` |
+| Exit acceptance vs depth (LayerSkip checkpoints) | `.venv/bin/python main.py exit-alpha` |
+| Selector calibration inside the decode loop | `SELECTOR_ROOT=<selector checkout> .venv/bin/python main.py selector-calibration --checkpoint <stage-1 ckpt>` |
+| Acceptance split by token type (needle task) | `.venv/bin/python main.py alpha-by-token-type --backend exit\|sparse` |
+| AR decode throughput baselines | `.venv/bin/python main.py ar-throughput` |
+| Exit-parity gate | `.venv/bin/python main.py validate-exit-parity` |
 
-No test suite or linter is configured yet.
+Correctness gates recorded so far: `validate-exit-parity` proves the k=L early-exit path reproduces the model's own logits bit-exactly (CPU, tiny model). Run it before and after touching `core/early_exit.py`.
+
+Selector dependency: the block-sparse selector (method under review) is a source dependency. Set `SELECTOR_ROOT` to its checkout; `core/selector.py` is the only module allowed to import it, and it documents the runtime assumptions it relies on. This venv mirrors that repo's dependency pins (see the pyproject comment); keep them in sync when bumping. That repo has no build-system, so an editable install is not possible.
+
+No linter is configured.
 
 ## Structure
 
@@ -40,9 +49,10 @@ No test suite or linter is configured yet.
 
 ## Code
 
-- One core package is the single source of truth; `experiments/` and `scripts/` import from it, never copy it. One top-level CLI entry point dispatches subcommands; configs are dataclasses.
-- Never duplicate code. Before writing a function, check whether the core package already provides it or can be extended. When an experiment needs different behavior, add a config option or hook to core instead of forking it.
-- Factor shared logic up into core the moment a second caller appears.
+- One package (`src/specdec`) is the single source of truth; experiments and scripts import from it, never copy it. One top-level CLI entry point dispatches subcommands; configs are dataclasses.
+- The `src/` directory holds exactly one thing: the `specdec` package. Nothing else goes directly under `src/`; the selector repo owns the `src.*` import namespace at runtime.
+- Never duplicate code. Before writing a function, check whether the package already provides it or can be extended. When an experiment needs different behavior, add a config option or hook to the package instead of forking it.
+- Factor shared logic up into the package the moment a second caller appears.
 - Comments state constraints and invariants the code cannot express. No narration of changes, nothing that goes stale.
 
 ## Conventions
@@ -57,7 +67,7 @@ No test suite or linter is configured yet.
 ## Git
 
 - Never author or co-author commits as Claude or any AI. No `Co-Authored-By` trailers, no "Generated with" lines, no AI references in commit messages, branches, or PRs. This overrides Claude Code defaults.
-- Commit messages: `<area>: <imperative summary>`. Lowercase, no trailing period, subject at most 72 characters. Area is the subsystem touched (`core`, `experiments`, `scripts`, `notes`, `repo` for meta changes); adjust areas as the layout grows.
+- Commit messages: `<area>: <imperative summary>`. Lowercase, no trailing period, subject at most 72 characters. Area is the subsystem touched (`specdec`, `notes`, `scripts`, `repo` for meta changes); adjust areas as the layout grows.
 - Body only when the change needs justification: the why or the constraint, wrapped at 72 characters. No body for self-explanatory changes.
 - One logical change per commit. Never mix a refactor with a behavior change.
 
