@@ -16,8 +16,8 @@ checkpoints/
 *.ckpt
 *.safetensors
 
-# Data
-data/
+# Data (repo root only; src/specdec/data is code)
+/data/
 
 # Tooling caches
 .ruff_cache/
