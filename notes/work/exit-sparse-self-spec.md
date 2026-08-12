@@ -36,7 +36,7 @@ committed KV  (every entry written by a full-depth gentle pass)
 | KV handling | Draft KV is temporary; verification recomputes and commits its own | Draft sparsity never leaks into the verified model's state, and error cannot accumulate. Costs ~15% on the weight term, paid knowingly (numbers below) |
 | Exit training | LoRA on the exit branch only, base frozen | Kangaroo-style ([2404.18911](https://arxiv.org/abs/2404.18911)); the target never moves, so this works on any frozen checkpoint |
 | Exit rule | Fixed layer k; per-token adaptive exit comes later | Keeps the kill test one-dimensional per axis |
-| Selection | Top-p over selector block scores, with a hard budget cap | p controls retained attention mass, the quantity a divergence bound is written in; the cap bounds worst-case cost |
+| Selection | The selector's own dual rule: fixed sink and recency reserves, then top-p over the residual block distribution, with a hard budget cap | The reserves keep the local structure every method protects; p controls retained attention mass, the quantity a divergence bound is written in; the cap bounds worst-case cost |
 
 ## Neighbors, and why nobody runs both sides sparse
 
@@ -56,7 +56,7 @@ Skipping the separate drafter is a production decision, not a taste: no second m
 
 1. The first self-speculative system where draft and verify are both sparse, with the selection signal external to both.
 2. Budgets profiled over depth: aggressive shallow drafting, gentle full-depth verification, exit boundary k as a control. Full depth (k=L) is a special case.
-3. Top-p mass coverage instead of top-k counts: the budget adapts per query, and retained mass is what a divergence bound is written in.
+3. Coverage p as the speculation control: the selector's calibrated top-p exists for plain inference; here it sets draft and verify budgets inside a speculation loop, and retained mass is what a divergence bound is written in.
 4. Commit semantics that make sparse self-speculation drift-free by construction and free the draft budget from any effect on output quality.
 5. The measured α(k, p, S, task) surface, with the batch and context map of where each half pays.
 
@@ -74,6 +74,8 @@ Reusing the draft's shallow compute at verification would save the k·W rerun (�
 
 Roofline sketch, Llama-3.1-8B BF16, batch 1, 64K, H100-class bandwidth, memory-bound terms only (model estimate, not a measurement): dense AR ~7.3ms per token, gentle-sparse AR at 25% ~5.4ms, our round (k=50%, 5% draft view, γ=5, τ≈4.5) ~3.4ms. That is 2.1x against dense but **1.6x against the correct baseline**, the sparse model itself, since that is the model our output matches. Every reported speedup must separate the selector's gain from the speculation gain.
 
+One caveat from the selector's own analysis: coverage is not uniform over depth. Early layers spread attention widely and need most of the context for calibrated coverage, while the last third of the network concentrates on very few tokens, and the asymmetry is structural to the backbone. So the 5% draft view above is a scenario to earn, not a default: the draft runs exactly the layers where mass is widest, and how low their coverage can go is what the kill test measures. The deep layers, nearly free to keep gentle, are the ones only verification runs.
+
 Where the numbers move:
 
 - **Longer context**: verification's KV traffic grows linearly in S while the draft view stays near constant, so the multiple rises with context. Same effect MagicDec measured.
@@ -90,7 +92,8 @@ What kills this, and how we cover each.
 | α collapses when exit meets sparsity | The two acceptance losses may compound worse than multiplicatively, the failure recorded for rejected idea #12 ([survey/ideas-rejected.md](survey/ideas-rejected.md)) | Kill-test condition 2 measures exactly this |
 | Exit fails on retrieval tokens | Retrieval integration sits in mid and deep layers; rejections would pile up on the tokens that make the task long-context | Calibration splits α by token type, needle vs local |
 | Early exit past 16K is unmeasured | No published early-exit result beyond 16K, and depth redundancy is shrinking in newer checkpoints ([2603.23701](https://arxiv.org/abs/2603.23701)) | LayerSkip checkpoints give an estimate for free before we spend on LoRA |
-| Selector scores do not track attention mass | Top-p budgets become arbitrary and no divergence bound can be written | Calibration condition: predicted retained mass must correlate with true mass |
+| Selector calibration breaks inside the loop | The published calibration is measured on full-model runs; draft-side states are shallow and sparse, and a drifted selector makes top-p budgets arbitrary | Calibration measurement below; expected small, checked in hours |
+| Shallow layers resist sparsity | Early layers need most of the context for calibrated coverage (selector analysis), and the draft runs exactly those layers | Kill test sweeps draft p; if shallow coverage refuses to go low, drafting falls back to gentle p and keeps the exit saving |
 | Block granularity misses needle tokens | Vegas beat block-approximate selection by 15-29% end-to-end; selection misses cost α 0.05 vs 0.99 on needle tasks (TriForce, 120K) | Gentle budget on the verify side; the aggressive side risks acceptance only, never correctness |
 | The multiple looks small next to dense-baseline numbers | 1.6x vs sparse AR at batch 1, 64K (estimate) | Report selector gain and speculation gain separately; the exact quality claim, the (k, p, γ) surface, and the regime map are the paper |
 
@@ -101,7 +104,7 @@ What kills this, and how we cover each.
 | Measurement | What it decides | Cost |
 |---|---|---|
 | LayerSkip public checkpoints, α_exit vs k at 8-32K | The exit half, before any LoRA spend | Hours |
-| Selector score mass vs true attention mass, correlation across tasks at 32K | Whether top-p and the divergence bound are possible | ~1 GPU-day |
+| Selector calibration on draft-side states: shallow depth, sparse view, inside the loop | Whether the published calibration (selector mass tracks the teacher's) carries over to speculation | Hours |
 | α split by token type, retrieval-hit vs local, at 32K | The pile-up-on-retrieval-tokens risk | Same runs |
 | Sparse-AR and dense-AR throughput at 32/64K | The baseline under every speedup we will ever quote | Hours |
 
@@ -119,7 +122,7 @@ All three must hold:
 
 1. α at k=50% stays above the cost-model break-even at 64K.
 2. α_comb ≥ α_exit · α_sparse: acceptance with both mechanisms on is at least the product of each alone.
-3. Predicted retained mass correlates with true attention mass.
+3. Selector calibration holds on draft-side states; the full-model version is already published.
 
 If one fails, that axis moves to [survey/ideas-rejected.md](survey/ideas-rejected.md) with the data, and the rest continues: k=L drops the exit and keeps both sides sparse; p=1 on the verify side keeps full verification with selector-driven drafting.
 
