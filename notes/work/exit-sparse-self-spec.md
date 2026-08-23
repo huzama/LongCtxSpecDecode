@@ -2,6 +2,8 @@
 
 Our method: self-speculative decoding where drafting and verification both run sparse through one external selector, with early exit as an option on the draft side. Extends ideas #0 and #1 in [survey/ideas-kept.md](survey/ideas-kept.md); evidence lives in [survey/landscape.md](survey/landscape.md).
 
+**Superseded in part.** The early-exit axis is rejected (survey #0) and the training-free variant is the current direction: read [exit-sparse-self-spec-training-free.md](exit-sparse-self-spec-training-free.md) alongside this. What still holds here: the round structure, the commitment semantics, the cost model for the sparse side, and the measured results behind them.
+
 **Notation**: α = per-token acceptance rate, τ = accepted tokens per round, γ = draft tokens per round, k = exit depth as a fraction of the L layers, p = attention-mass coverage of a sparse view, S = context length, W = model weight bytes, AR = autoregressive decoding. A *gentle* view keeps enough budget to match dense quality; an *aggressive* view keeps far less.
 
 **TL;DR**

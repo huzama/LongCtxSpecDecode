@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Research codebase for long-context speculative decoding built on sparse attention. The literature survey and research direction live in `notes/`; the method design is `notes/work/exit-sparse-self-spec.md`. Code lives in `src/specdec` (one package, installed editable by `uv sync`) with experiments in `src/specdec/experiments`, and a single CLI (`main.py`). Before touching research code, read `notes/work/survey/README.md` and follow its reading order, at minimum `landscape.md` and `ideas-kept.md`.
+Research codebase for long-context speculative decoding built on sparse attention. The literature survey and research direction live in `notes/`; the method design is `notes/work/exit-sparse-self-spec-training-free.md` (current) with `notes/work/exit-sparse-self-spec.md` as the superseded base it extends; measured results are in `notes/work/results/`. Code lives in `src/specdec` (one package, installed editable by `uv sync`) with experiments in `src/specdec/experiments`, and a single CLI (`main.py`). Before touching research code, read `notes/work/survey/README.md` and follow its reading order, at minimum `landscape.md` and `ideas-kept.md`.
 
 ## Environment
 
