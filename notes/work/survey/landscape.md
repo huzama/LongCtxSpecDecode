@@ -7,6 +7,7 @@ The field's state of knowledge. Settled is the floor we stand on, contested is w
 - Verification is the bottleneck: 85–95% of round time once drafting is cheap, and accepted tokens per round are log-bounded in verifier capacity.
 - No published acceptance or speedup datapoint exists past 128K, in any family.
 - MLA and sequential hybrids change the physics: KV-centric methods stop transferring.
+- Training-free query-aware KV selection matches trained selection at moderate density. The measured difference is selector cost, and quality separates only at aggressive budgets that nobody has compared.
 
 ## ✅ Settled
 
@@ -26,6 +27,11 @@ Facts the field agrees on, strongest citations attached. Build on them, never re
 | 10 | Batched speculation was silently incorrect in major open-source stacks as late as 2025 | [2510.22876](https://arxiv.org/abs/2510.22876); gains compress at production concurrency (Meta 1.4–2.0x; P-EAGLE +5–25% @c=64) |
 | 11 | MLA changes the physics | Arithmetic intensity >100x MHA, toward compute-bound ([2507.15465](https://arxiv.org/abs/2507.15465)); MLA KV 69KB/tok vs Qwen3-32B 256KB/tok; DeepSeek shipped weight-amortizing MTP (1.8x), not KV-sparse drafting; correctly so, per the arithmetic |
 | 12 | No published acceptance/speedup datapoint exists past 128K, in any family | TriForce (2024) + QuantSpec remain the high-water marks; Windowed-MTP ([2607.21535](https://arxiv.org/abs/2607.21535)) is the lone 1M draft-KV datapoint, window-local MTP heads only |
+| 13 | Training-free query-aware selection matches trained selection at moderate density | Matched budget at K=0.5L, our selector vs Twilight vs Quest: RULER .988/.975/.988, BABILong .330/.303/.330, inside bootstrap error. NSA at 2560 activated tokens: Quest .392 vs oracle top-k .423, so heuristic-versus-oracle scoring is worth .031. A trained indexer beats mean-pooled blocks by 1.51 LongBench points. The separation appears only at aggressive budgets: AIME-24 @2K, Quest 18.15 vs dense 74.48 |
+| 14 | Untrained early exit through the model's own head is broken, and it is the logit lens | Tuned Lens ([2303.08112](https://arxiv.org/abs/2303.08112)): no interpretable predictions before layer 21 of 32, bias 4–5 bits, cause is hidden-state covariance drift. SimLens ([2507.17618](https://arxiv.org/abs/2507.17618)): mean accuracy 0.251. PPD ([2307.05908](https://arxiv.org/abs/2307.05908)): 21.6–38.9% top-1 agreement at layer 20/40, which the speedup formula turns into ~0.90x. Layer *skipping* escapes this by keeping the final layers, which is why it alone needs no training |
+| 15 | Under batching, neuron sparsity vanishes and attention-head sparsity survives | Polar Sparsity ([2505.14884](https://arxiv.org/abs/2505.14884)), the only sweep from batch 1 to 512: the union of active MLP neurons across a batch goes dense, while head sparsity is batch-invariant |
+| 16 | Skipping an attention sublayer removes its KV as well as its weights | LLM-Drop ([2406.15786](https://arxiv.org/abs/2406.15786)): attention is 3–4x more redundant than MLP, and dropping 20 of 40 attention sublayers is also a ~50% KV cut. The only depth mechanism that touches the term dominating at batch and length |
+| 17 | Sparse attention inflates generation length | Quest at a 2K budget on AIME-24 generates 30.0K tokens against 14.8K dense (+103%). Any sparse-attention throughput claim must report tokens generated; lossless speculation is immune by construction |
 
 ## ⚖️ Contested
 
@@ -41,10 +47,12 @@ Questions where published papers directly disagree, both sides shown with a verd
 | 6 | Do diffusion drafters survive long context? | DFlash decays to τ2.09 @32K zero-shot | A 1.6K-sample fine-tune recovers τ3.56 | Data patch or architectural limit? No data past 32K |
 | 7 | KV-reuse drafting: principle vs wall-clock | KVShot ([2604.26412](https://arxiv.org/abs/2604.26412)): reading target KV improves long-range acceptance | e2e speedup marginal: shallow drafters cannot estimate target queries; sparse gradients | Contested whether block-wise training fixes it |
 | 8 | Thin-evidence zones | — | — | SSM drafters past 8K: nothing; cross-tokenizer at length: nothing; MTP acceptance-vs-length in production: never published; 256K–1M: nothing; StreamServe's 11–18x: implausible baselines (4 GPUs, 80 queries) |
+| 9 | Does speculation pay at rollout-scale batch? | MagicDec: yes above S_inflection, 2.51x at batch 32–256; EfficientRollout ([2606.18967](https://arxiv.org/abs/2606.18967)): the batch drains as sequences finish, restoring memory-boundedness | verl measures ~50% rollout throughput *loss* with MTP and tells users to leave it off; SpecActor ([2511.16193](https://arxiv.org/abs/2511.16193)) reports no or negative speedup at batch 256 | Unresolved. Two-roof arithmetic puts verification memory-bound at ≥8K context up to batch 512, contradicting both negatives, so the disagreement is empirical. Measure before betting → idea #15's first experiment |
+| 10 | Does speculation give RL training what it needs? | Rejection sampling preserves the target distribution exactly, so rollouts are unbiased | It preserves the *engine's* distribution, not the trainer's; and enabling it currently zeroes generation logprobs, so importance sampling cannot be applied at all ([NeMo-RL #1785](https://github.com/NVIDIA-NeMo/RL/pull/1785)) | Both true. Speculation removes the bias sparsity would add but not the engine-versus-trainer mismatch. A lossless verifier computes exact target logprobs anyway, so exposing them dissolves the conflict → idea #15 |
 
 ## 🧮 Arithmetic
 
-What the hardware allows, independent of what anyone published. Every idea must survive this table: it rejects #12–#14 and points #1 at verification.
+What the hardware allows, independent of what anyone published. Every idea must survive this table: it rejects #0 and #12–#14, points #1 at verification, and points #15 at attention sublayers.
 
 Constants: H100 3.35TB/s, 990 TF BF16, ridge 296 FLOP/B. Model validated to 3% vs VeriCache. Speedup = τ/(L·c+1), c = draft/target step cost.
 
@@ -60,3 +68,6 @@ Constants: H100 3.35TB/s, 990 TF BF16, ridge 296 FLOP/B. Model validated to 3% v
 | 8 | Self-spec regime gate | Wins iff B·S·kvB > W → S_inflection = 256K/B for Qwen3-32B (B=8→32K; B=1→~400K); ~26K for MHA-7B | Explains why TriForce used MHA and why MagicDec needs batch ≥32 |
 | 9 | MLA targets | KV = 1.4–30% of decode bytes at B=1–32 up to 128K → sparse-KV drafting max gain 1.01–1.43x | **Arithmetic malpractice below batch ~64**; weight-amortizing MTP is the only lever (measured 1.8x); KV-centric research does not transfer |
 | 10 | Batch ceiling | Verify exits memory-bound at B(L+1) ≳ 296 (B>59 at L=4); long context postpones the ridge (KV intensity (L+1)·g ≈ 40 ≪ 296) | The arithmetic behind all measured concurrency decay; **speculation and batching are complementary at 128K–1M exactly where they conflict at 4K**; γ must shrink with B |
+| 11 | Attention-sublayer skip vs uniform layer skip | Row 7 assumes depth reduction leaves KV intact, which is true only for uniform skip. Skipping a fraction s of *attention* sublayers scales the draft's KV read by (1−s): draft cost = (W − s·W_attn) + (1−s)·p·B·S·kvB. At s=50%, p=10%, γ=8, τ=6.1 (Qwen3-4B): 2.02→2.44x at B=32/8K, 3.24→**4.13x** at B=128/32K | **+21–28%, not row 7's +2%.** The depth axis survives only in the attention-sublayer form, and only composed with per-layer KV budgets → idea #15 |
+| 12 | Byte split across (batch, context) | Qwen3-4B KV share of decode bytes: 7/13/38% at B=1 (4K/8K/32K); 71/83/95% at B=32; 91/95/99% at B=128 | Above batch ~8 the KV term is the only one worth attacking. Weight-side levers (quantized draft, width pruning, uniform layer skip) are rounding errors there |
+| 13 | Rollout arithmetic | If generation is 70–80% of an RL step, a 2.9–4.1x rollout speedup is 1.9–2.5x end to end | The motivation's ceiling. It needs the rollout share to hold, and it needs row 9's contested question resolved first |

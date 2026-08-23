@@ -35,9 +35,15 @@ families:
   - key: sparse-kv
     name: "Sparse-KV drafting"
     verdict: "✅ The converged recipe: survives and strengthens with context and batch. Constraints: selection must be attention-retrieval not eviction; budget likely grows with S; verification becomes the bottleneck."
+  - key: sparse-selection
+    name: "Sparse-attention KV selection"
+    verdict: "✅ Training-free query-aware selection matches trained selection at moderate density; the measured gap is selector cost, not quality. Quality separates only at aggressive budgets, where nobody has compared them."
   - key: kv-compression
     name: "KV-compression drafting"
     verdict: "✅ Strongest acceptance-vs-length results in the literature; the 128K high-water marks live here or adjacent."
+  - key: compressed-draft
+    name: "Compressed-weight and pruned drafting"
+    verdict: "☠️ Attacks the weight term, which is 1–9% of decode bytes once batch and context grow. Neuron sparsity vanishes under batching, and untrained width pruning costs a quarter of accepted length."
   - key: sparse-verify
     name: "Sparse / partial verification"
     verdict: "🔥 The 2026 frontier: attacks the true bottleneck (verify KV bytes = 85–95% of round time) but silently abandons the target distribution. No divergence certificates exist."
@@ -53,6 +59,9 @@ families:
   - key: serving
     name: "Serving systems & runtime control"
     verdict: "🏭 The engines serving 128K–1M cannot compose the needed features (no dynamic trees on MLA/SWA in TRT-LLM; vLLM PP+SD gaps); gains compress to 1.4–2.0x at production concurrency."
+  - key: rl-rollout
+    name: "RL rollout acceleration"
+    verdict: "🏭 Crowded and trained-drafter shaped. Frameworks measure slowdowns and ship staleness bugs; no entry drafts against sparse KV; and enabling speculation currently disables the importance-sampling correction that keeps RL training stable."
   - key: ssm-hybrid
     name: "SSM / linear / hybrid drafters & targets, cross-tokenizer"
     verdict: "🕳️ The O(1)-state drafters that should dominate at 128K have never been measured there; sequential-hybrid targets are effectively un-draftable via component reuse (α=0.038)."
@@ -389,10 +398,11 @@ papers:
     arxiv: "2504.06419"
     year: 2025
     family: sparse-kv
-    summary: "Sparse-KV self-spec variant"
+    summary: "Depth reduction and sparse draft KV combined in one drafter"
     lossless: true
+    max_ctx: "512"
     speedup: "+35% over MagicDec-style (modeled)"
-    note: "Modeled, not measured"
+    note: "The only published combination of the two axes, and it is trained at 67M/512 tokens. States the condition plainly: speculation helps large-batch decode if context is long and the draft KV is sparse"
   - name: "KVShot"
     arxiv: "2604.26412"
     year: 2026
@@ -791,13 +801,6 @@ papers:
     lossless: true
     speedup: "1.78x branch concurrency @B=16"
     note: "Draft pages otherwise eat scheduler token budget"
-  - name: "ReSpec"
-    year: 2026
-    venue: "MLSys'26"
-    family: serving
-    summary: "Speculative decoding for RL rollouts"
-    lossless: true
-    speedup: "4.5x rollouts"
   - name: "Consumer-hardware audit"
     arxiv: "2607.17283"
     year: 2026
@@ -815,9 +818,9 @@ papers:
     arxiv: "2510.20064"
     year: 2025
     family: serving
-    summary: "Full-information online draft selection"
+    summary: "Full-information online drafter selection: every candidate is scored from one target query, so exploration costs nothing"
     lossless: true
-    note: "Runtime-control prior art for idea #10"
+    note: "Runtime-control prior art for idea #10; the mechanism idea #16 borrows, moved from the drafter axis to the budget axis"
   - name: "OnlineSpec"
     arxiv: "2603.12617"
     year: 2026
@@ -889,3 +892,331 @@ papers:
     summary: "Universal drafter across targets"
     lossless: true
     speedup: "1.5–2x"
+
+  # --- Sparse-attention KV selection ---
+  - name: "Quest"
+    arxiv: "2406.10774"
+    year: 2024
+    venue: "ICML'24"
+    family: sparse-selection
+    summary: "Query-aware page selection from per-page min/max key bounds; fixed top-k"
+    max_ctx: "128K"
+    speedup: "7.03x self-attention; 2.23x e2e"
+    note: "The training-free baseline everyone compares against. Collapses at aggressive budgets (AIME-24 @2K: 18.2 vs dense 74.5) and ships with two crutches: page 16 and dense first two layers"
+  - name: "Twilight"
+    arxiv: "2502.02770"
+    year: 2025
+    venue: "NeurIPS'25 Spotlight"
+    family: sparse-selection
+    summary: "Top-p pruning layered on any top-k selector, giving a per-query adaptive budget"
+    max_ctx: "128K"
+    speedup: "15.4x self-attention vs FA2; 3.9x e2e"
+    note: "Output-error bound (1−p)·‖V‖. The training-free analogue of a calibrated top-p selector, but it pays a two-stage exact-score pass (4.59 ms/step @128K) and p is hand-set per checkpoint"
+  - name: "Tactic"
+    arxiv: "2502.12216"
+    year: 2025
+    family: sparse-selection
+    summary: "Calibration-free budget from a target fraction of cumulative attention mass"
+    max_ctx: "96K"
+    speedup: "7.29x decode attention; 1.58x e2e"
+    note: "Budget swings 959 → 2298 tokens on one task between 70% and 90% mass targets: the budget is workload-determined, not a constant"
+  - name: "vAttention"
+    arxiv: "2510.05688"
+    year: 2026
+    venue: "ICLR'26"
+    family: sparse-selection
+    summary: "Top-k plus random sampling gives an unbiased tail estimate; budget meets a user-specified (ε, δ)"
+    max_ctx: "32K generations"
+    note: "The only selector with a stated statistical guarantee. Matches dense quality to 20x sparsity; +4.5 pp RULER-HARD at 10% density"
+  - name: "PrHS"
+    arxiv: "2602.08329"
+    year: 2026
+    family: sparse-selection
+    summary: "Pre-hoc sparsity that controls dropped attention mass directly"
+    speedup: "9.9x attention latency; 2.8x throughput"
+    note: "Bounds mutual-information loss by dropped mass alone: the closest published object to a KV-budget divergence certificate (idea #2)"
+  - name: "UNIQUE"
+    arxiv: "2605.27740"
+    year: 2026
+    family: sparse-selection
+    summary: "Page score from mean key plus a standard-deviation offset"
+    max_ctx: "256K"
+    speedup: "11.4x kernel vs FlashInfer; ≥5.3x e2e vs vLLM"
+    note: "Cheaper and better behaved than min/max bounds; still a fixed top-k"
+  - name: "Double-P"
+    arxiv: "2602.05191"
+    year: 2026
+    family: sparse-selection
+    summary: "Two-stage top-p: size-weighted cluster centroids, then token-level refinement"
+    speedup: "1.3x e2e over fixed-budget selection"
+  - name: "PSA"
+    arxiv: "2503.00392"
+    year: 2025
+    family: sparse-selection
+    summary: "Grows the per-layer selected set until an attention-mass target is met"
+    speedup: "1.4–2.0x throughput"
+  - name: "SqueezeAttention"
+    arxiv: "2404.04793"
+    year: 2025
+    venue: "ICLR'25"
+    family: sparse-selection
+    summary: "Layer-wise budget allocation wrapped around any token-level selector"
+    note: "Adaptive across layers but not across queries: the existing half of per-layer budgeting (idea #15)"
+  - name: "LessIsMore"
+    arxiv: "2508.07101"
+    year: 2026
+    family: sparse-selection
+    summary: "Cross-head union selection for reasoning traces"
+    note: "Qwen3-8B AIME-24 at a 2K budget: 73.75 vs Quest 18.15 (dense 74.48). The aggressive-budget regime is where selectors separate"
+  - name: "MagicPIG"
+    arxiv: "2410.16179"
+    year: 2024
+    family: sparse-selection
+    summary: "LSH sampling in place of top-k selection"
+    note: "Measures the ceiling every selector works under: the top 20% of tokens carry only 70–80% of attention mass at 96K"
+  - name: "SeerAttention-R"
+    arxiv: "2506.08889"
+    year: 2026
+    venue: "ICLR'26"
+    family: sparse-selection
+    summary: "Trained block selector specialised for reasoning decode"
+    lossless: false
+    note: "Largest published trained-vs-training-free gap (AIME24 @4k budget: 72.3 vs Quest 44.2), but measured with Quest forced out of its designed configuration"
+  - name: "NSA"
+    arxiv: "2502.11089"
+    year: 2025
+    family: sparse-selection
+    summary: "Natively trainable sparse attention with a hardware-aligned block layout"
+    lossless: false
+    note: "Matched-budget LongBench at 2560 activated tokens: Quest .392 vs oracle top-k .423, so heuristic-versus-oracle scoring is worth only .031"
+  - name: "MoBA"
+    arxiv: "2502.13189"
+    year: 2025
+    family: sparse-selection
+    summary: "Mixture of block attention with a mean-pooling router"
+    lossless: false
+    note: "The router has zero parameters: its advantage comes from adapting the backbone, not from trained selection. Do not cite it as evidence for trained selectors"
+  - name: "Double Sparsity"
+    arxiv: "2408.07092"
+    year: 2024
+    family: sparse-selection
+    summary: "Token sparsity composed with channel sparsity"
+    max_ctx: "256K (offloaded)"
+    note: "Offline channel calibration: training-free but not drop-in"
+  - name: "Loki"
+    arxiv: "2406.02542"
+    year: 2024
+    venue: "NeurIPS'24"
+    family: sparse-selection
+    summary: "Low-rank key projections for cheap scoring"
+    note: "Offline PCA over keys: not drop-in"
+  - name: "ShadowKV"
+    arxiv: "2410.21465"
+    year: 2025
+    venue: "ICML'25"
+    family: sparse-selection
+    summary: "Low-rank key cache with offloaded values"
+    speedup: "6x larger batch; 3.04x throughput"
+    note: "Post-prefill SVD: not drop-in"
+  - name: "RetrievalAttention"
+    arxiv: "2409.10516"
+    year: 2025
+    venue: "NeurIPS'25"
+    family: sparse-selection
+    summary: "Vector retrieval over the KV cache with an approximate-nearest-neighbour index"
+    max_ctx: "128K"
+    note: "Per-context index build; accesses 1–3% of the cache"
+
+  # --- Compressed-weight and pruned drafting ---
+  - name: "QSpec"
+    arxiv: "2410.11305"
+    year: 2025
+    venue: "EMNLP'25"
+    family: compressed-draft
+    summary: "W4A4 draft verified by the W4A16 target; same weights, no extra memory"
+    lossless: true
+    speedup: "1.35–1.64x @batch 8–32"
+    note: "Genuinely training-free, and it runs out of memory at batch 32 for 8B/13B: KV capacity binds exactly where the paper stops"
+  - name: "ML-SpecQD"
+    arxiv: "2503.13565"
+    year: 2025
+    family: compressed-draft
+    summary: "Direct-cast MXFP4 self-draft, no calibration"
+    lossless: true
+    max_ctx: "≤4K"
+    acceptance: "71–91%"
+    speedup: "1.86–2.03x; 2.22–2.72x multi-level"
+    note: "CPU only, batch 1"
+  - name: "SubSpec"
+    arxiv: "2509.18344"
+    year: 2025
+    venue: "NeurIPS'25"
+    family: compressed-draft
+    summary: "Offloaded layers replaced by 4-bit substitutes; GPU layers and KV shared with the target"
+    lossless: true
+    max_ctx: "2048"
+    acceptance: "τ27.08"
+    speedup: "9.15–12.5x vs offloaded AR"
+    note: "The win comes from layer and KV sharing, not from quantization"
+  - name: "SD²"
+    arxiv: "2504.08838"
+    year: 2025
+    family: compressed-draft
+    summary: "SparseGPT-pruned drafter, self-distilled back to the target"
+    note: "One-shot 50% pruning without distillation costs 25% of mean accepted length at 1B: width pruning does not survive without training"
+  - name: "Polar Sparsity"
+    arxiv: "2505.14884"
+    year: 2025
+    venue: "NeurIPS'25"
+    family: compressed-draft
+    summary: "Head-selective attention with trained routers; the only work sweeping batch 1 to 512"
+    lossless: false
+    speedup: "1.51–2.2x"
+    note: "MLP and neuron sparsity vanish under batching while attention-head sparsity stays batch-invariant. This is why cheap-weights drafts die at serving scale"
+  - name: "LLM-Drop"
+    arxiv: "2406.15786"
+    year: 2024
+    family: compressed-draft
+    summary: "One-shot cosine criterion for dropping whole attention sublayers"
+    note: "Attention is 3–4x more redundant than MLP, and dropping 20 of 40 attention sublayers is also a ~50% KV cut: the depth lever that touches the dominant term"
+  - name: "TEAL"
+    arxiv: "2408.14690"
+    year: 2025
+    venue: "ICLR'25"
+    family: compressed-draft
+    summary: "Training-free magnitude activation sparsity applied model-wide"
+    speedup: "1.53–1.8x decode"
+    note: "Never used as a drafter; batch 1 only; needs custom kernels"
+  - name: "Sirius"
+    arxiv: "2409.03856"
+    year: 2024
+    family: compressed-draft
+    summary: "A contextually sparse model generates and the dense model corrects every 16 tokens"
+    lossless: false
+    note: "The authors measured sparse drafts inside speculation and rejected it: acceptance plateaus. The standing counter-hypothesis for any sparse-draft method"
+
+  # --- RL rollout acceleration ---
+  - name: "Speculative decoding in NeMo-RL"
+    arxiv: "2604.26779"
+    year: 2026
+    family: rl-rollout
+    summary: "MTP and EAGLE3 drafting inside a production RL rollout engine"
+    speedup: "1.8x rollout @8B synchronous; 2.5x e2e @235B asynchronous"
+    note: "Trained draft heads, so the acceptance-staleness burden moves into the training loop"
+  - name: "SpecActor"
+    arxiv: "2511.16193"
+    year: 2026
+    family: rl-rollout
+    summary: "Decoupled draft and verify pipelining for rollout generation"
+    speedup: "2.0–2.4x rollout; 1.4–2.3x e2e"
+    note: "Reports no or negative speedup from plain speculation at common rollout batch sizes (256): the negative result any large-batch claim must clear"
+  - name: "EfficientRollout"
+    arxiv: "2606.18967"
+    year: 2026
+    family: rl-rollout
+    summary: "Quantized self-drafter for rollout generation"
+    speedup: "−19.6% rollout time; −12.7% e2e"
+    note: "Observes the batch draining as sequences finish, moving decode from compute-bound back to memory-bound where verification rides along free"
+  - name: "BubbleSpec"
+    arxiv: "2605.08862"
+    year: 2026
+    family: rl-rollout
+    summary: "Fills long-tail data-parallel bubbles with speculative work"
+    speedup: "1.8x rollout"
+  - name: "SPEC-RL"
+    arxiv: "2509.23232"
+    year: 2025
+    family: rl-rollout
+    summary: "Reuses prior-epoch rollout prefixes as drafts"
+    speedup: "2–3x rollout"
+    note: "Orthogonal to draft construction; composes with any drafter"
+  - name: "ReSpec"
+    arxiv: "2510.26475"
+    year: 2026
+    venue: "MLSys'26"
+    family: rl-rollout
+    summary: "Speculative rollout generation for RL post-training"
+    lossless: true
+    speedup: "4.5x rollouts"
+  - name: "Nested-ReFT"
+    arxiv: "2508.10123"
+    year: 2025
+    family: rl-rollout
+    summary: "Layer-skipped target used as the behaviour model for rollouts"
+    lossless: false
+    note: "The only layer-skip rollout drafter, and it abandons exactness: off-policy by construction"
+  - name: "Rollout-training mismatch"
+    arxiv: "2605.14220"
+    year: 2026
+    family: rl-rollout
+    summary: "Measures training collapse when the inference engine and the trainer disagree numerically"
+    note: "Reward 0.87 → 0.40 → near-zero without truncated importance sampling. Speculation preserves the engine's distribution, not the trainer's, so it does not remove this correction"
+  - name: "verl MTP guidance"
+    url: "https://github.com/verl-project/verl/blob/main/docs/advance/mtp.md"
+    year: 2026
+    family: rl-rollout
+    summary: "Framework guidance on speculative decoding during rollout"
+    note: "Measures roughly 50% rollout throughput *loss* with MTP enabled and advises leaving it off. The strongest citable warning against naive speculation at rollout batch"
+  - name: "NeMo-RL logprob conflict"
+    url: "https://github.com/NVIDIA-NeMo/RL/pull/1785"
+    year: 2026
+    family: rl-rollout
+    summary: "Speculative decoding returns zeroed generation logprobs, disabling importance sampling"
+    note: "A lossless verifier computes exact target logprobs as a byproduct of accept/reject, so exposing them removes this conflict entirely"
+
+  # --- Additions to existing families ---
+  - name: "Tuned Lens"
+    arxiv: "2303.08112"
+    year: 2023
+    venue: "ICML'23"
+    family: early-exit
+    summary: "The logit lens is untrained early exit; this measures where it fails and repairs it by training"
+    note: "Fails to elicit interpretable predictions before layer 21 of 32; bias 4–5 bits; cause is hidden-state covariance drifting apart with depth. Analysis, not a method"
+  - name: "SimLens"
+    arxiv: "2507.17618"
+    year: 2026
+    family: early-exit
+    summary: "Measures plain logit-lens accuracy across models and repairs it without training the backbone"
+    note: "Untrained own-head decoding averages 0.251 accuracy over six model-dataset pairs and 0.000 on one. The quantitative case that a shared head needs alignment"
+  - name: "PPD"
+    arxiv: "2307.05908"
+    year: 2023
+    family: early-exit
+    summary: "Parallel decoding through the frozen own head at an intermediate layer"
+    acceptance: "21.6–38.9% top-1 agreement @layer 20/40"
+    note: "The formula turns that agreement into ~0.90x: untrained exit is a measured slowdown, not an unexplored option"
+  - name: "ConfLayers"
+    arxiv: "2604.14612"
+    year: 2026
+    family: layer-skip
+    summary: "Entropy-guided skip-set search with periodic re-search every 30 iterations"
+    lossless: true
+    speedup: "≤1.4x"
+    note: "Confirms that any online skip search must assume drift and restart"
+  - name: "SVIP"
+    arxiv: "2411.18462"
+    year: 2025
+    venue: "EMNLP'25"
+    family: serving
+    summary: "Draft-length control from draft entropy as a discrepancy proxy"
+    speedup: "≤17% @8K; ≤22% long-form"
+    note: "Training-free γ control"
+  - name: "GammaTune"
+    arxiv: "2504.00030"
+    year: 2025
+    family: serving
+    summary: "Heuristic γ switching driven by observed token acceptance"
+    speedup: "15%±5% on SpecBench"
+    note: "Training-free; acceptance is already measured, so the signal is free"
+  - name: "AdaEDL"
+    arxiv: "2410.18351"
+    year: 2024
+    family: serving
+    summary: "Entropy lower bound on acceptance probability used as a draft stopping rule"
+    note: "Training-free and parameter-free"
+  - name: "TapOut"
+    arxiv: "2511.02017"
+    year: 2025
+    family: serving
+    summary: "Bandit over several parameter-free draft-stopping rules"
+    note: "Hyperparameter-free by construction; controls γ only, never the KV budget"

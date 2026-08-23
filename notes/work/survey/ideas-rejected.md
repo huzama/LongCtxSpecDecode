@@ -5,6 +5,7 @@ Kill reasons on record so no dead idea is re-litigated. IDs are shared with [ide
 **TL;DR**
 - The starting hypotheses did not survive the literature. The corrected forms below are what the kept bets stand on.
 - #12–#14 are dead on arithmetic: layer-skip as a core framing caps at ~1.5x regardless of context length.
+- #0 is dead four times over: the exit head cannot be shared without training, training it does not survive length, the axis is worth little at batch, and modern checkpoints have no depth redundancy left. Its intent survives as #15.
 - Append-only. Reopen an entry only by attacking its recorded reason with new evidence.
 
 ## Corrected starting hypotheses
@@ -39,8 +40,20 @@ Kill reasons on record so no dead idea is re-litigated. IDs are shared with [ide
 
 | ID | Direction | Kill reason | Reopen / salvage |
 |---|---|---|---|
-| #12 | 2D (layer × KV-budget) knapsack drafter [G2] | Arithmetic: composition adds ~2% at B≥8/128K and acceptance multiplies *down* (landscape, arithmetic #7) | Only as batch-1, 512K–1M self-spec (+30–40% predicted); reopen test below. The early-exit variant (shared prefix) is kept as idea #0 |
+| #0 | Early-exit both-sides-sparse: depth-profiled budgets behind an exit head | Four independent kills, detail below | The depth *intent* survives without an exit head: allocate KV budget per layer with zero as a legal value, which cuts KV as well as weights (arithmetic #11). Kept as idea #15 |
+| #12 | 2D (layer × KV-budget) knapsack drafter [G2] | Arithmetic: composition adds ~2% at B≥8/128K and acceptance multiplies *down* (landscape, arithmetic #7) | **Partly superseded**: the ~2% figure assumes uniform layer skip, which leaves KV intact. Skipping *attention* sublayers cuts KV too, and the composition is worth +21–28% (arithmetic #11). That form is now idea #15. The binary-knapsack framing and the acceptance objection stand; the reopen test below still applies |
 | #13 | Layer-skip/early-exit acceptance curves 64K–1M + LayerSkip training at 128K [G1] | Ceiling ~1.5x (landscape, arithmetic #5): a measurement, not a project | As a measurement section inside another paper (e.g. #12's reopen test). Cite KnapSpec, AdaSkip ([2501.02336](https://arxiv.org/abs/2501.02336)), [2603.23701](https://arxiv.org/abs/2603.23701) (redundancy shrinking in modern checkpoints) |
 | #14 | Layer-skip self-spec under continuous batching [G5] | Serving-engineering project on a 1.5x-capped direction; SparseSpec deliberately routed around it | Only if #12's niche pans out |
+
+**#0 kill detail.** The four reasons are independent, so patching one does not revive it.
+
+| # | Reason | Evidence |
+|---|---|---|
+| 1 | An untrained exit head does not work, and never could | Early exit through the model's own head is the logit lens (settled #14): no interpretable predictions before layer 21 of 32, mean accuracy 0.251, 21.6–38.9% top-1 agreement at half depth, which the speedup formula turns into ~0.90x |
+| 2 | A trained exit head does not survive length | Our own α grid on LayerSkip checkpoints: usable to 16K, collapsed at 32K below 62.5% depth, and dead at 64K at *every* depth (≤0.34). SparseSpec-L benchmarks a LayerSkip draft at 60K at 0.77x |
+| 3 | The axis barely pays where the method is aimed | Depth reduction adds ≤18% on top of sparse-KV drafting at batch 128 and ≤10% at 32K (arithmetic #12), because it attacks weight bytes, which are 1–9% of traffic there |
+| 4 | Modern checkpoints have no depth redundancy left | Oracle skip ratio 38% for Llama2-7B on MMLU, 17% on GSM8K, **0% for Qwen3-8B** ([2603.23701](https://arxiv.org/abs/2603.23701)), which also states that early exit on base models fails even given oracle layer-similarity information |
+
+What survives: the goal of spending less work in layers that need less. Realised as per-layer KV budget rather than as an exit boundary, it needs no head, no adapter, and no training, and it cuts the dominant term instead of the negligible one. That is idea #15.
 
 **#12 reopen test**: the composition is fully novel and fits our DP/selector skills; ingredients are KnapSpec + Vegas. Measure α of (50% skip × 4K sparse) jointly at 64K. If α_comb < α_skip·α_sparse (super-multiplicative damage), the rejection stands; if not, pursue only in the batch-1, 512K–1M niche.

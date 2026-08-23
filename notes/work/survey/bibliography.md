@@ -15,15 +15,18 @@ length (tokens/round); they are not comparable across papers without the qualifi
 |---|---|---|
 | [Independent AR drafters](#independent-ar-drafters) | ☠️ Dead at long context: GQA floors drafter KV (speedup ceiling ~1.1x) and acceptance collapses by 8–16K. | 2 |
 | [Draft heads (Medusa / EAGLE / MTP)](#draft-heads-medusa-eagle-mtp) | ❌ Die beyond the trained window unless drafter state is O(1) or norm-fixed; trained-short is the failure, not the head architecture. | 10 |
-| [Self-speculation: layer skip](#self-speculation-layer-skip) | 🪦 Capped at ~1.0–1.5x: cost ratio is context-invariant, so it cannot touch the KV term that dominates 128K+. Secondary multiplier at best. | 9 |
-| [Early exit](#early-exit) | ❓ Zero long-context evidence anywhere; structurally 1M-friendly (shared exit-layer KV) but unmeasured past 16K and no 128K training recipe exists. | 5 |
+| [Self-speculation: layer skip](#self-speculation-layer-skip) | 🪦 Capped at ~1.0–1.5x: cost ratio is context-invariant, so it cannot touch the KV term that dominates 128K+. Secondary multiplier at best. | 10 |
+| [Early exit](#early-exit) | ❓ Zero long-context evidence anywhere; structurally 1M-friendly (shared exit-layer KV) but unmeasured past 16K and no 128K training recipe exists. | 8 |
 | [Sparse-KV drafting](#sparse-kv-drafting) | ✅ The converged recipe: survives and strengthens with context and batch. Constraints: selection must be attention-retrieval not eviction; budget likely grows with S; verification becomes the bottleneck. | 10 |
+| [Sparse-attention KV selection](#sparse-attention-kv-selection) | ✅ Training-free query-aware selection matches trained selection at moderate density; the measured gap is selector cost, not quality. Quality separates only at aggressive budgets, where nobody has compared them. | 18 |
 | [KV-compression drafting](#kv-compression-drafting) | ✅ Strongest acceptance-vs-length results in the literature; the 128K high-water marks live here or adjacent. | 5 |
+| [Compressed-weight and pruned drafting](#compressed-weight-and-pruned-drafting) | ☠️ Attacks the weight term, which is 1–9% of decode bytes once batch and context grow. Neuron sparsity vanishes under batching, and untrained width pruning costs a quarter of accepted length. | 8 |
 | [Sparse / partial verification](#sparse-partial-verification) | 🔥 The 2026 frontier: attacks the true bottleneck (verify KV bytes = 85–95% of round time) but silently abandons the target distribution. No divergence certificates exist. | 5 |
 | [Retrieval / n-gram / suffix drafting](#retrieval-n-gram-suffix-drafting) | ✅ Only family trivially length-robust on the draft side (zero drafter KV); beats trained heads at 4–64K in third-party evals; task-dependent; unmeasured past 64K. | 9 |
 | [Block-diffusion drafters](#block-diffusion-drafters) | ⚠️ SOTA short-context drafting; decays hard by 32K zero-shot; bidirectional attention over long prompts is quadratic and unanalyzed; nothing past 32K. | 6 |
 | [Tree speculation & theory](#tree-speculation-theory) | 📐 No theory anywhere has a context-length axis; the log(P) acceptance ceiling kills giant trees; optimal tree-vs-context is unsolved. | 14 |
-| [Serving systems & runtime control](#serving-systems-runtime-control) | 🏭 The engines serving 128K–1M cannot compose the needed features (no dynamic trees on MLA/SWA in TRT-LLM; vLLM PP+SD gaps); gains compress to 1.4–2.0x at production concurrency. | 14 |
+| [Serving systems & runtime control](#serving-systems-runtime-control) | 🏭 The engines serving 128K–1M cannot compose the needed features (no dynamic trees on MLA/SWA in TRT-LLM; vLLM PP+SD gaps); gains compress to 1.4–2.0x at production concurrency. | 17 |
+| [RL rollout acceleration](#rl-rollout-acceleration) | 🏭 Crowded and trained-drafter shaped. Frameworks measure slowdowns and ship staleness bugs; no entry drafts against sparse KV; and enabling speculation currently disables the importance-sampling correction that keeps RL training stable. | 10 |
 | [SSM / linear / hybrid drafters & targets, cross-tokenizer](#ssm-linear-hybrid-drafters-targets-cross-tokenizer) | 🕳️ The O(1)-state drafters that should dominate at 128K have never been measured there; sequential-hybrid targets are effectively un-draftable via component reuse (α=0.038). | 8 |
 
 ## Independent AR drafters
@@ -67,6 +70,7 @@ length (tokens/round); they are not comparable across papers without the qualifi
 | [KnapSpec](https://arxiv.org/abs/2602.20217) '26 | 0/1 knapsack over attention/MLP sublayers with context-dependent latency model; cosine acceptance proxy (0.837 corr.) | ✓ | 16K | — | 1.47x peak @~16K | First context-dependent skip selection; still confirms the ~1.5x family cap |
 | [AdaSkip](https://arxiv.org/abs/2501.02336) '25 | Adaptive sublayer skipping for long-context inference | ✓ | — | — | — | Skip-selection ingredient for idea #13 |
 | [Layer-redundancy analysis](https://arxiv.org/abs/2603.23701) '26 | Modern pretraining reduces layer redundancy, shrinking skip/exit headroom | — | — | — | — | Analysis, not a method; threat to the whole family |
+| [ConfLayers](https://arxiv.org/abs/2604.14612) '26 | Entropy-guided skip-set search with periodic re-search every 30 iterations | ✓ | — | — | ≤1.4x | Confirms that any online skip search must assume drift and restart |
 
 ## Early exit
 
@@ -79,6 +83,9 @@ length (tokens/round); they are not comparable across papers without the qualifi
 | [EESD](https://arxiv.org/abs/2406.03853) '24 | Early-exit drafting with Thompson-sampling draft length | ✓ | — | — | 2.29x (70B GSM8K) | — |
 | [PPSD](https://arxiv.org/abs/2509.19368) '25 | Verify-while-draft pipelining across exit points | ✓ | — | — | 2.01–3.81x | — |
 | [Mirror-SD](https://arxiv.org/abs/2510.13161) '25 | Bidirectional early-exit speculation across heterogeneous accelerators | ✓ | — | — | 2.8–5.8x; +30% over EAGLE-3 | Strongest early-exit numbers; entirely short-context |
+| [Tuned Lens](https://arxiv.org/abs/2303.08112) '23 | The logit lens is untrained early exit; this measures where it fails and repairs it by training | — | — | — | — | Fails to elicit interpretable predictions before layer 21 of 32; bias 4–5 bits; cause is hidden-state covariance drifting apart with depth. Analysis, not a method |
+| [SimLens](https://arxiv.org/abs/2507.17618) '26 | Measures plain logit-lens accuracy across models and repairs it without training the backbone | — | — | — | — | Untrained own-head decoding averages 0.251 accuracy over six model-dataset pairs and 0.000 on one. The quantitative case that a shared head needs alignment |
+| [PPD](https://arxiv.org/abs/2307.05908) '23 | Parallel decoding through the frozen own head at an intermediate layer | — | — | 21.6–38.9% top-1 agreement @layer 20/40 | — | The formula turns that agreement into ~0.90x: untrained exit is a measured slowdown, not an unexplored option |
 
 ## Sparse-KV drafting
 
@@ -94,8 +101,33 @@ length (tokens/round); they are not comparable across papers without the qualifi
 | [SparseSpec (PillarAttn)](https://arxiv.org/abs/2512.01278) '26 | Only serving-grade self-spec (batch 256, TP); dynamic pillar-token selection | ✓ | — | 6.16/8 accepted on reasoning CoT (EAGLE-3/n-gram <2) | 2.13x vs vLLM; 1.36x vs MagicDec; 1.76x vs TriForce | Static budgets fail on shifting saliency; k=8 fixed with no staleness ablation |
 | [SparseSpec-L](https://arxiv.org/abs/2607.27735) '26 | Training-free recallable eviction; dense KV retained off the hot path | ✓ | 64K | 52–84.6% α | 2.79x @~10% KV ratio | Single-A40 cap; 128-token generations only |
 | [BudgetDraft](https://arxiv.org/abs/2606.00144) '26 | Multi-view budget training for budget-robust sparse drafters | ✓ | 16K | 91.6% α @4K → ~18% α @16K | 6.55x / 4.46x / 2.10x @4K/8K/16K | Budget-robust ≠ length-robust; drafter's native 2048 position range is the suspected artifact (idea #7) |
-| [SPIRe](https://arxiv.org/abs/2504.06419) '25 | Sparse-KV self-spec variant | ✓ | — | — | +35% over MagicDec-style (modeled) | Modeled, not measured |
+| [SPIRe](https://arxiv.org/abs/2504.06419) '25 | Depth reduction and sparse draft KV combined in one drafter | ✓ | 512 | — | +35% over MagicDec-style (modeled) | The only published combination of the two axes, and it is trained at 67M/512 tokens. States the condition plainly: speculation helps large-batch decode if context is long and the draft KV is sparse |
 | [KVShot](https://arxiv.org/abs/2604.26412) '26 | Drafter reads target KV to rescue long-range acceptance | ✓ | — | improves long-range acceptance | marginal e2e | Shallow drafters can't estimate target queries; sparse gradients; block-wise training contested |
+
+## Sparse-attention KV selection
+
+**Verdict: ✅ Training-free query-aware selection matches trained selection at moderate density; the measured gap is selector cost, not quality. Quality separates only at aggressive budgets, where nobody has compared them.**
+
+| Paper | Summary | Lossless | Max ctx | Acceptance | Speedup | Long-ctx note |
+|---|---|---|---|---|---|---|
+| [Quest](https://arxiv.org/abs/2406.10774) '24 | Query-aware page selection from per-page min/max key bounds; fixed top-k | — | 128K | — | 7.03x self-attention; 2.23x e2e | The training-free baseline everyone compares against. Collapses at aggressive budgets (AIME-24 @2K: 18.2 vs dense 74.5) and ships with two crutches: page 16 and dense first two layers |
+| [Twilight](https://arxiv.org/abs/2502.02770) '25 | Top-p pruning layered on any top-k selector, giving a per-query adaptive budget | — | 128K | — | 15.4x self-attention vs FA2; 3.9x e2e | Output-error bound (1−p)·‖V‖. The training-free analogue of a calibrated top-p selector, but it pays a two-stage exact-score pass (4.59 ms/step @128K) and p is hand-set per checkpoint |
+| [Tactic](https://arxiv.org/abs/2502.12216) '25 | Calibration-free budget from a target fraction of cumulative attention mass | — | 96K | — | 7.29x decode attention; 1.58x e2e | Budget swings 959 → 2298 tokens on one task between 70% and 90% mass targets: the budget is workload-determined, not a constant |
+| [vAttention](https://arxiv.org/abs/2510.05688) '26 | Top-k plus random sampling gives an unbiased tail estimate; budget meets a user-specified (ε, δ) | — | 32K generations | — | — | The only selector with a stated statistical guarantee. Matches dense quality to 20x sparsity; +4.5 pp RULER-HARD at 10% density |
+| [PrHS](https://arxiv.org/abs/2602.08329) '26 | Pre-hoc sparsity that controls dropped attention mass directly | — | — | — | 9.9x attention latency; 2.8x throughput | Bounds mutual-information loss by dropped mass alone: the closest published object to a KV-budget divergence certificate (idea #2) |
+| [UNIQUE](https://arxiv.org/abs/2605.27740) '26 | Page score from mean key plus a standard-deviation offset | — | 256K | — | 11.4x kernel vs FlashInfer; ≥5.3x e2e vs vLLM | Cheaper and better behaved than min/max bounds; still a fixed top-k |
+| [Double-P](https://arxiv.org/abs/2602.05191) '26 | Two-stage top-p: size-weighted cluster centroids, then token-level refinement | — | — | — | 1.3x e2e over fixed-budget selection | — |
+| [PSA](https://arxiv.org/abs/2503.00392) '25 | Grows the per-layer selected set until an attention-mass target is met | — | — | — | 1.4–2.0x throughput | — |
+| [SqueezeAttention](https://arxiv.org/abs/2404.04793) '25 | Layer-wise budget allocation wrapped around any token-level selector | — | — | — | — | Adaptive across layers but not across queries: the existing half of per-layer budgeting (idea #15) |
+| [LessIsMore](https://arxiv.org/abs/2508.07101) '26 | Cross-head union selection for reasoning traces | — | — | — | — | Qwen3-8B AIME-24 at a 2K budget: 73.75 vs Quest 18.15 (dense 74.48). The aggressive-budget regime is where selectors separate |
+| [MagicPIG](https://arxiv.org/abs/2410.16179) '24 | LSH sampling in place of top-k selection | — | — | — | — | Measures the ceiling every selector works under: the top 20% of tokens carry only 70–80% of attention mass at 96K |
+| [SeerAttention-R](https://arxiv.org/abs/2506.08889) '26 | Trained block selector specialised for reasoning decode | ✗ | — | — | — | Largest published trained-vs-training-free gap (AIME24 @4k budget: 72.3 vs Quest 44.2), but measured with Quest forced out of its designed configuration |
+| [NSA](https://arxiv.org/abs/2502.11089) '25 | Natively trainable sparse attention with a hardware-aligned block layout | ✗ | — | — | — | Matched-budget LongBench at 2560 activated tokens: Quest .392 vs oracle top-k .423, so heuristic-versus-oracle scoring is worth only .031 |
+| [MoBA](https://arxiv.org/abs/2502.13189) '25 | Mixture of block attention with a mean-pooling router | ✗ | — | — | — | The router has zero parameters: its advantage comes from adapting the backbone, not from trained selection. Do not cite it as evidence for trained selectors |
+| [Double Sparsity](https://arxiv.org/abs/2408.07092) '24 | Token sparsity composed with channel sparsity | — | 256K (offloaded) | — | — | Offline channel calibration: training-free but not drop-in |
+| [Loki](https://arxiv.org/abs/2406.02542) '24 | Low-rank key projections for cheap scoring | — | — | — | — | Offline PCA over keys: not drop-in |
+| [ShadowKV](https://arxiv.org/abs/2410.21465) '25 | Low-rank key cache with offloaded values | — | — | — | 6x larger batch; 3.04x throughput | Post-prefill SVD: not drop-in |
+| [RetrievalAttention](https://arxiv.org/abs/2409.10516) '25 | Vector retrieval over the KV cache with an approximate-nearest-neighbour index | — | 128K | — | — | Per-context index build; accesses 1–3% of the cache |
 
 ## KV-compression drafting
 
@@ -108,6 +140,21 @@ length (tokens/round); they are not comparable across papers without the qualifi
 | [SpecKV-γ](https://arxiv.org/abs/2605.02888) '26 | Optimal draft length shifts with weight precision (FP16: 2–4; INT8: 6–8; NF4: 4–6) | ✓ | — | ~0.70 α across precisions | +56% over fixed γ=4 | Explicitly flags KV-quant x SD interaction as unstudied (idea #4) |
 | [Lynx](https://arxiv.org/abs/2607.01831) '26 | Bit-plane KV-transfer speculation | ✓ | — | — | 1.43x TTFT | — |
 | [MLA-drafter conversion](https://arxiv.org/abs/2607.27269) '26 | MLA-converting drafters break acceptance via attention-function error; calibration fixes 37/64 cells | ✓ | — | — | — | — |
+
+## Compressed-weight and pruned drafting
+
+**Verdict: ☠️ Attacks the weight term, which is 1–9% of decode bytes once batch and context grow. Neuron sparsity vanishes under batching, and untrained width pruning costs a quarter of accepted length.**
+
+| Paper | Summary | Lossless | Max ctx | Acceptance | Speedup | Long-ctx note |
+|---|---|---|---|---|---|---|
+| [QSpec](https://arxiv.org/abs/2410.11305) '25 | W4A4 draft verified by the W4A16 target; same weights, no extra memory | ✓ | — | — | 1.35–1.64x @batch 8–32 | Genuinely training-free, and it runs out of memory at batch 32 for 8B/13B: KV capacity binds exactly where the paper stops |
+| [ML-SpecQD](https://arxiv.org/abs/2503.13565) '25 | Direct-cast MXFP4 self-draft, no calibration | ✓ | ≤4K | 71–91% | 1.86–2.03x; 2.22–2.72x multi-level | CPU only, batch 1 |
+| [SubSpec](https://arxiv.org/abs/2509.18344) '25 | Offloaded layers replaced by 4-bit substitutes; GPU layers and KV shared with the target | ✓ | 2048 | τ27.08 | 9.15–12.5x vs offloaded AR | The win comes from layer and KV sharing, not from quantization |
+| [SD²](https://arxiv.org/abs/2504.08838) '25 | SparseGPT-pruned drafter, self-distilled back to the target | — | — | — | — | One-shot 50% pruning without distillation costs 25% of mean accepted length at 1B: width pruning does not survive without training |
+| [Polar Sparsity](https://arxiv.org/abs/2505.14884) '25 | Head-selective attention with trained routers; the only work sweeping batch 1 to 512 | ✗ | — | — | 1.51–2.2x | MLP and neuron sparsity vanish under batching while attention-head sparsity stays batch-invariant. This is why cheap-weights drafts die at serving scale |
+| [LLM-Drop](https://arxiv.org/abs/2406.15786) '24 | One-shot cosine criterion for dropping whole attention sublayers | — | — | — | — | Attention is 3–4x more redundant than MLP, and dropping 20 of 40 attention sublayers is also a ~50% KV cut: the depth lever that touches the dominant term |
+| [TEAL](https://arxiv.org/abs/2408.14690) '25 | Training-free magnitude activation sparsity applied model-wide | — | — | — | 1.53–1.8x decode | Never used as a drafter; batch 1 only; needs custom kernels |
+| [Sirius](https://arxiv.org/abs/2409.03856) '24 | A contextually sparse model generates and the dense model corrects every 16 tokens | ✗ | — | — | — | The authors measured sparse drafts inside speculation and rejected it: acceptance plateaus. The standing counter-hypothesis for any sparse-draft method |
 
 ## Sparse / partial verification
 
@@ -186,11 +233,31 @@ length (tokens/round); they are not comparable across papers without the qualifi
 | [Meta production study](https://arxiv.org/abs/2508.08192) '25 | Speculation at production concurrency | ✓ | — | — | 1.4–2.0x at production batch (vs 2–3x @bs=1) | The concurrency-compression datapoint |
 | [DSpark](https://arxiv.org/abs/2607.05147) '26 | DeepSeek-V4 speculative serving | ✓ | — | — | +60–85% per-user at matched throughput | — |
 | [TransKV](https://www.techrxiv.org/doi/full/10.36227/techrxiv.177101038.80960856/v1) '26 | Transactional KV: draft tokens stay in token-sized buffers until accepted, not block-granular pages | ✓ | — | — | 1.78x branch concurrency @B=16 | Draft pages otherwise eat scheduler token budget |
-| **ReSpec** '26 | Speculative decoding for RL rollouts | ✓ | — | — | 4.5x rollouts | — |
 | [Consumer-hardware audit](https://arxiv.org/abs/2607.17283) '26 | 3/5 consumer configs decelerate under speculation on serialized backends | — | — | — | — | Speculation is not free off-datacenter |
 | [BanditSpec](https://arxiv.org/abs/2505.15141) '25 | Bandit selection of drafting configuration | ✓ | — | — | — | Runtime-control prior art for idea #10 |
-| [Not-a-Bandit](https://arxiv.org/abs/2510.20064) '25 | Full-information online draft selection | ✓ | — | — | — | Runtime-control prior art for idea #10 |
+| [Not-a-Bandit](https://arxiv.org/abs/2510.20064) '25 | Full-information online drafter selection: every candidate is scored from one target query, so exploration costs nothing | ✓ | — | — | — | Runtime-control prior art for idea #10; the mechanism idea #16 borrows, moved from the drafter axis to the budget axis |
 | [OnlineSpec](https://arxiv.org/abs/2603.12617) '26 | Online speculation adaptation under drift | ✓ | — | — | — | Runtime-control prior art for idea #10 |
+| [SVIP](https://arxiv.org/abs/2411.18462) '25 | Draft-length control from draft entropy as a discrepancy proxy | — | — | — | ≤17% @8K; ≤22% long-form | Training-free γ control |
+| [GammaTune](https://arxiv.org/abs/2504.00030) '25 | Heuristic γ switching driven by observed token acceptance | — | — | — | 15%±5% on SpecBench | Training-free; acceptance is already measured, so the signal is free |
+| [AdaEDL](https://arxiv.org/abs/2410.18351) '24 | Entropy lower bound on acceptance probability used as a draft stopping rule | — | — | — | — | Training-free and parameter-free |
+| [TapOut](https://arxiv.org/abs/2511.02017) '25 | Bandit over several parameter-free draft-stopping rules | — | — | — | — | Hyperparameter-free by construction; controls γ only, never the KV budget |
+
+## RL rollout acceleration
+
+**Verdict: 🏭 Crowded and trained-drafter shaped. Frameworks measure slowdowns and ship staleness bugs; no entry drafts against sparse KV; and enabling speculation currently disables the importance-sampling correction that keeps RL training stable.**
+
+| Paper | Summary | Lossless | Max ctx | Acceptance | Speedup | Long-ctx note |
+|---|---|---|---|---|---|---|
+| [Speculative decoding in NeMo-RL](https://arxiv.org/abs/2604.26779) '26 | MTP and EAGLE3 drafting inside a production RL rollout engine | — | — | — | 1.8x rollout @8B synchronous; 2.5x e2e @235B asynchronous | Trained draft heads, so the acceptance-staleness burden moves into the training loop |
+| [SpecActor](https://arxiv.org/abs/2511.16193) '26 | Decoupled draft and verify pipelining for rollout generation | — | — | — | 2.0–2.4x rollout; 1.4–2.3x e2e | Reports no or negative speedup from plain speculation at common rollout batch sizes (256): the negative result any large-batch claim must clear |
+| [EfficientRollout](https://arxiv.org/abs/2606.18967) '26 | Quantized self-drafter for rollout generation | — | — | — | −19.6% rollout time; −12.7% e2e | Observes the batch draining as sequences finish, moving decode from compute-bound back to memory-bound where verification rides along free |
+| [BubbleSpec](https://arxiv.org/abs/2605.08862) '26 | Fills long-tail data-parallel bubbles with speculative work | — | — | — | 1.8x rollout | — |
+| [SPEC-RL](https://arxiv.org/abs/2509.23232) '25 | Reuses prior-epoch rollout prefixes as drafts | — | — | — | 2–3x rollout | Orthogonal to draft construction; composes with any drafter |
+| [ReSpec](https://arxiv.org/abs/2510.26475) '26 | Speculative rollout generation for RL post-training | ✓ | — | — | 4.5x rollouts | — |
+| [Nested-ReFT](https://arxiv.org/abs/2508.10123) '25 | Layer-skipped target used as the behaviour model for rollouts | ✗ | — | — | — | The only layer-skip rollout drafter, and it abandons exactness: off-policy by construction |
+| [Rollout-training mismatch](https://arxiv.org/abs/2605.14220) '26 | Measures training collapse when the inference engine and the trainer disagree numerically | — | — | — | — | Reward 0.87 → 0.40 → near-zero without truncated importance sampling. Speculation preserves the engine's distribution, not the trainer's, so it does not remove this correction |
+| [verl MTP guidance](https://github.com/verl-project/verl/blob/main/docs/advance/mtp.md) '26 | Framework guidance on speculative decoding during rollout | — | — | — | — | Measures roughly 50% rollout throughput *loss* with MTP enabled and advises leaving it off. The strongest citable warning against naive speculation at rollout batch |
+| [NeMo-RL logprob conflict](https://github.com/NVIDIA-NeMo/RL/pull/1785) '26 | Speculative decoding returns zeroed generation logprobs, disabling importance sampling | — | — | — | — | A lossless verifier computes exact target logprobs as a byproduct of accept/reject, so exposing them removes this conflict entirely |
 
 ## SSM / linear / hybrid drafters & targets, cross-tokenizer
 

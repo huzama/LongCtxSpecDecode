@@ -1,19 +1,20 @@
 # Ideas: Kept
 
-Live bets. Evidence lives in [landscape.md](landscape.md); dead directions and the corrected starting hypotheses live in [ideas-rejected.md](ideas-rejected.md). IDs #0–#14 are stable across both files.
+Live bets. Evidence lives in [landscape.md](landscape.md); dead directions and the corrected starting hypotheses live in [ideas-rejected.md](ideas-rejected.md). IDs #0–#15 are stable across both files.
 
 **TL;DR**
-- Our bets: **#0/#1** (both-sides-sparse via an external block-sparse oracle; #0 adds the early-exit depth axis), **#2+#6** (certification + control of sparse verification), **#3+#4** (the measurement papers nobody has done, executable in weeks).
-- Avoid pure drafting improvements (bottleneck moved to verification) and layer-skip framings (rejected, arithmetic-capped).
+- Our bets: **#15+#8** (training-free depth-profiled KV budgets, allocated online from measured acceptance), **#1** (both-sides-sparse via an external oracle), **#2+#6** (certification + control of sparse verification), **#3+#4** (the measurement papers nobody has done, executable in weeks).
+- Avoid pure drafting improvements (bottleneck moved to verification), exit heads (#0, rejected four ways), and uniform layer-skip framings (#12–#14, arithmetic-capped).
+- Nothing in #15 or #8 requires training. That is the constraint they are designed around, not a coincidence.
 - Every idea carries a falsifiable 2-week kill test. Run it: the idea graduates to active work or moves to rejected with data.
 
 ## 🚀 Menu
 
-Ranked by impact × tractability × fit for us (sparse attention; block-sparse selector method under review). Audit = how much is already published; [G*] in headings points into data/raw-data.json. Read #0–#4 in detail first.
+Ranked by impact × tractability × fit for us (sparse attention; block-sparse selector method under review). Audit = how much is already published; [G*] in headings points into data/raw-data.json. Read #15 first, then #8, #1 and #2. The sections below run by ID after #15.
 
 | # | Idea | Audit | 2-week kill test |
 |---|---|---|---|
-| **0** | Early-exit both-sides-sparse: depth-profiled budgets, shared sparse prefix | open | α(k × budget) grid @32–64K; α usable at k=50% and α_comb ≥ α_exit·α_sparse |
+| **15** | Training-free depth-profiled KV budgets: per-layer coverage, zero allowed | open | per-layer ablation @32K; allocated draft beats flat sparse drafting ≥15% at equal α, and some layer band tolerates zero |
 | **1** | Both-sides-sparse: sparse draft + sparse verify via external selector oracle | partially-solved | selector-restricted verify @12.5% budget; acceptance holds within ~5% → project lives |
 | **2** | Divergence certification: KV budget → output-distribution bound | open | attention-mass ↔ realized-KL correlation @32K; one strong plot validates the program |
 | **3** | Acceptance-vs-(budget, length) surface, 128K–1M | partially-solved | fit α(B, L) over {32K, 128K, 256K} × budgets; sublinear vs linear vs task-forked |
@@ -21,18 +22,17 @@ Ranked by impact × tractability × fit for us (sparse attention; block-sparse s
 | 5 | Staleness/refresh policy for verification-recycled importance | open | freeze indices {8–1024} steps; plot acceptance-vs-staleness decay |
 | 6 | Adaptive full-verification triggering for partial verification | open | attention-mass-missed vs realized drift: GovReport (cliff) vs QA (safe) |
 | 7 | Length-robust *trained* sparse-KV drafting past 32K | open | retrain BudgetDraft 68M with Anchor-Offset @32K; does 16K acceptance move off ~18%? |
-| 8 | Online (drafter budget × γ) controller across (batch, context, load) | partially-solved | (B, γ) grid per cell; 2-feature predictor recovers ≥90% oracle throughput |
+| **8** | Online (drafter KV budget × γ) controller driven by measured acceptance | open | replay α(coverage, length) surfaces, then live @32K; recover ≥90% of oracle fixed-budget throughput with no offline sweep |
 | 9 | Self-speculation for sequential-hybrid / SSM targets | partially-solved | LayerSkip-style finetune on 0.5–1B hybrid; does α recover from 0.038? |
 | 10 | No-regret draft-path adaptation over 30K–100K generations | partially-solved | EXP3 budget selection on 13K-token AIME traces vs fixed |
 | 11 | SSM drafter acceptance past 8K | open | Mamba-130M + Llama-3.1-8B on LongSpecBench @128K vs OWL-LSTM |
 
-### #0 Early-exit both-sides-sparse: depth-profiled budgets over a shared sparse prefix
-- **Why #0**: sparse-KV self-drafting is weight-bound at batch 1 below S_inflection (≈400K for a GQA 32B; landscape, arithmetic #8): sparsity cannot touch the weight term, early exit divides it by the exit fraction. It is also the one drafting lever that transfers to MLA targets (arithmetic #9), our hedge against risk #2. Generalizes #1: full depth is the k=L special case.
-- **Design**: one selector, a depth-profiled budget B(layer), exit boundary k. Draft = sparse prefix + exit head on a frozen target (Kangaroo-style adapter). Verify = continue the deep layers, reusing the prefix compute and KV. Draft and verify must share the sparse pattern inside the prefix; "different sparsity" lives across depth, not between the two passes. Contract: lossless w.r.t. the sparse-prefix target (SSV precedent, [2605.19893](https://arxiv.org/abs/2605.19893)) or certified via #2.
-- **Not #12**: layer skip reruns skipped layers at verification and its cost ratio is context-invariant (rejected). Early exit shares the prefix, so draft work counts toward verification and only rejected tokens pay.
-- **Baselines**: LayerSkip ([2404.16710](https://arxiv.org/abs/2404.16710)), Kangaroo ([2404.18911](https://arxiv.org/abs/2404.18911)), Mirror-SD ([2510.13161](https://arxiv.org/abs/2510.13161)): all early exit, all ≤16K, all full attention; Vegas + Dustin via #1; [2603.23701](https://arxiv.org/abs/2603.23701) (layer-redundancy shrinkage, the headwind to beat); Component-Aware SD ([2605.01106](https://arxiv.org/abs/2605.01106), exit training recovers hybrids, idea #9's evidence).
-- **Risk**: early exit has zero published evidence past 16K anywhere (family verdict), and it is a batch-1 story first (risk #7): frame as local long context or show the weight saving below the batch ridge.
-- **2-week kill test**: Llama-3.1-8B + Kangaroo-style adapter at 32–64K; grid k ∈ {25%, 50%} × draft budget ∈ {full, 25%, 6%}. Gates: α at k=50% stays usable at 64K, and α_comb ≥ α_exit·α_sparse (the super-multiplicativity check inherited from #12's reopen test). Day-one calibration before any training: Meta's LayerSkip checkpoints at native context.
+### #15 Training-free depth-profiled KV budgets: per-layer coverage with zero as a legal value
+- **Why #15**: the depth axis is dead in its exit form (#0, rejected four ways) but alive in the one form that touches the dominant term. Skipping an *attention* sublayer removes its KV as well as its weights (settled #16), so "skip a layer" and "give a layer budget zero" are the same knob at two settings. Composed with per-layer coverage this is worth +21–28% over flat sparse drafting at rollout batch (arithmetic #11), with no training anywhere in the system.
+- **Novel delta**: a draft whose KV read is sparse in two dimensions at once, across layers and within each layer, with the allocation driven by measured acceptance rather than a proxy. SqueezeAttention ([2404.04793](https://arxiv.org/abs/2404.04793)) allocates across layers but outside speculation and not per query. KnapSpec ([2602.20217](https://arxiv.org/abs/2602.20217)) allocates *binary* skip over sublayers with a cosine proxy and stops at batch 1. SPIRe ([2504.06419](https://arxiv.org/abs/2504.06419)) is the only published depth-and-sparsity draft and it is trained at 67M parameters and 512 tokens.
+- **Baselines**: KnapSpec, SqueezeAttention, LLM-Drop ([2406.15786](https://arxiv.org/abs/2406.15786)) for the skip criterion, SPIRe, and Vegas / SparseSpec-L as the flat-budget sparse draft to beat.
+- **Risk**: contested #9. If speculation does not pay at rollout batch at all, the composition is moot, so the batch crossover is measured first. Our own per-layer data also shows shallow layers needing roughly twice the budget of deep ones, so the zero-budget set is likely small and deep.
+- **2-week kill test**: Qwen3-8B at 32K. Zero one layer band at a time, measure α and step time; then search a per-layer allocation against flat budgeting at matched cost. Gates: the allocated draft beats flat sparse drafting by ≥15% in throughput at equal α, and at least one layer band tolerates zero budget.
 
 ### #1 Both-sides-sparse: compose sparse drafting with sparse verification, breaking oracle circularity [G11]
 - **Why #1**: verification is 85–95% of round time (landscape, arithmetic #6), the only place large headroom remains; every verification-recycled drafter (Vegas/PillarAttn/SparseSpec-L) structurally *requires* full-KV verification for its signal. **Our block-sparse selector is a third-party importance oracle that does not need full verification attention: the exact missing piece.**
@@ -70,9 +70,13 @@ Ranked by impact × tractability × fit for us (sparse attention; block-sparse s
 - **Baselines**: BudgetDraft ([2606.00144](https://arxiv.org/abs/2606.00144), budget-robust not length-robust); LongSpec ([2502.17421](https://arxiv.org/abs/2502.17421), architecture without budget training); [2605.09992](https://arxiv.org/abs/2605.09992) (norm fixes).
 - **2-week experiment**: retrain BudgetDraft's llama-68m with Anchor-Offset positions on 32K data; test whether 16K acceptance moves off ~18%. Cheap (68M params), decisive.
 
-### #8 Online (drafter KV budget × γ) controller across (batch, context, load) [G12]
-- **Novel delta**: the γ axis is covered (Nightjar [2512.22420](https://arxiv.org/abs/2512.22420), FASER, SpecKV-γ); the *budget* axis is untouched at runtime: Vegas fixes sparsity per run, BudgetDraft never deploys its robustness. Needs an α(task, L, B) predictor (which #3 produces) + joint policy under HBM pressure. Position as adding the budget dimension to Nightjar/FASER/SpecKV.
-- **2-week experiment**: with a budget-robust drafter, grid-search (B, γ) offline per (batch, context) cell; show the optimum moves and a 2-feature predictor recovers ≥90% of oracle throughput.
+### #8 Online (drafter KV budget × γ) controller driven by measured acceptance [G12]
+- **Novel delta**: the γ axis is covered (Nightjar [2512.22420](https://arxiv.org/abs/2512.22420), FASER, BanditSpec, TapOut, GammaTune, SmartSpec); the *budget* axis is untouched at runtime, confirmed by a second sweep. Vegas picks sparsity by an offline sweep before deployment, SSV switches among offline-profiled candidates, SparseSpec-L fixes the total budget and tunes only γ, and BudgetDraft never deploys its robustness. Nobody uses acceptance as the control signal for sparsity.
+- **The mechanism that makes it cheap**: score every budget arm from one verification pass rather than exploring arms one at a time, the full-information trick from Not-a-Bandit ([2510.20064](https://arxiv.org/abs/2510.20064)) moved from the drafter axis to the budget axis. Exploration then costs nothing, and a wrong arm can never damage output, only throughput, because verification is lossless. That safety property is available here and unavailable to sparse attention deployed on its own.
+- **Why it is needed, not just nice**: the right budget moves with model and workload (our floors: coverage 0.5 at 8B, 0.7 at 4B) and moves *inside* a request as context grows. A fixed budget is wrong for most of a long generation.
+- **Baselines**: Vegas's offline sweep, SSV's profiled switching, SparseSpec-L's entropy rule for γ, Twilight's hand-set p ([2502.02770](https://arxiv.org/abs/2502.02770)); vAttention ([2510.05688](https://arxiv.org/abs/2510.05688)) as the estimator to borrow for the mass-versus-budget curve.
+- **Risk**: nonstationarity forces sliding-window estimators over UCB (the regret analysis belongs to #10); per-request budgets break kernel batching (risk #7); single-step acceptance is too noisy to act on, so decisions need smoothing (SSV waits for five consecutive steps below 0.85x its expectation).
+- **2-week experiment**: replay the measured α(coverage, length) surfaces in simulation, then run live at 32K on Qwen3-8B. Gates: the controller recovers ≥90% of oracle fixed-budget throughput with no offline sweep, and never trails the fixed-budget baseline by more than 5% while exploring.
 
 ### #9 Self-speculation for sequential-hybrid / SSM targets [G4]
 - **Novel delta**: (a) LayerSkip-style training on a hybrid checkpoint (never done); (b) shared-recurrent-state self-spec semantics (ReplaySSM handles separate-path rollback only); (c) checkpoint/replay overhead at 100K. High strategic value (2026 frontier is hybrid) but moderate fit and heavier lift.
@@ -101,3 +105,4 @@ What kills these bets, and how we cover each.
 | 6 | Acceptance is checkpoint-idiosyncratic | OWL-collapse vs (unverified) MiniMax-flat; DFlash fixed by 1.6K fine-tuning samples. An acceptance-drift phenomenon may be a training-data artifact patched by a fine-tune, not a law. | Evaluate on multiple checkpoints; report per-checkpoint, never as a universal claim. |
 | 7 | Serving reality | Engines cannot compose the features (TRT-LLM: no dynamic trees on MLA/SWA; vLLM PP+SD gaps; batched-SD correctness only fixed in 2025); gains compress 2–3x → 1.4–2.0x at production concurrency; heterogeneous per-request sparse paths break kernel homogeneity. A batch-1 bespoke-kernel method will not ship. | Design batch-compatible from day one: SparseSpec routed around batched layer-skip for exactly this reason. |
 | 8 | The cheap baselines are embarrassing | PLD/SAMD/SuffixDecoding: zero training, zero GPU state, τ2.75–4.98 at 4–64K, beat EAGLE-3, already in vLLM. | Benchmark against SAMD+TR (τ4.98) and HOWL (τ6.14) from day one, not just AR decoding. |
+| 9 | The large-batch regime may not admit speculation at all | verl measures ~50% rollout throughput *loss* with MTP enabled and advises leaving it off; SpecActor reports no or negative speedup at batch 256. If decode is compute-bound there, no drafter design rescues it and #15/#8 lose their headline regime. | Claim the tail rather than the average: long traces and drained batches are memory-bound (contested #9). Measure the crossover before building anything on top of it. |
