@@ -32,11 +32,17 @@ REPO=$(git rev-parse --show-toplevel) && \
 | Selector calibration inside the decode loop | `SELECTOR_ROOT=<selector checkout> .venv/bin/python main.py selector-calibration --checkpoint <stage-1 ckpt>` |
 | Acceptance split by token type (needle task) | `.venv/bin/python main.py alpha-by-token-type --backend exit\|sparse` |
 | AR decode throughput baselines | `.venv/bin/python main.py ar-throughput` |
+| Verify-cost scaling vs query count | `.venv/bin/python main.py verify-scaling [--backend hf\|selector-dense\|selector-sparse]` |
+| Trained vs training-free block scoring at matched budget | `SELECTOR_ROOT=<selector checkout> .venv/bin/python main.py scorer-comparison --checkpoint <stage-1 ckpt>` |
 | Exit-parity gate | `.venv/bin/python main.py validate-exit-parity` |
+| Scorer-math gate | `.venv/bin/python main.py validate-scorers` |
 
-Correctness gates recorded so far: `validate-exit-parity` proves the k=L early-exit path reproduces the model's own logits bit-exactly (CPU, tiny model). Run it before and after touching `core/early_exit.py`.
+Correctness gates. Run each before and after touching the code it covers:
 
-Selector dependency: the block-sparse selector (method under review) is a source dependency. Set `SELECTOR_ROOT` to its checkout; `core/selector.py` is the only module allowed to import it, and it documents the runtime assumptions it relies on. This venv mirrors that repo's dependency pins (see the pyproject comment); keep them in sync when bumping. That repo has no build-system, so an editable install is not possible.
+- `validate-exit-parity` proves the k=L early-exit path reproduces the model's own logits bit-exactly (CPU, tiny model). Covers `models/early_exit.py`.
+- `validate-scorers` proves block statistics keep the tail block, the Quest score genuinely upper-bounds the true query-key product inside every block, and the oracle scores itself at exactly 1.0 recall and efficiency (CPU, synthetic). Covers `models/scorers.py` and `metrics/selection.py`.
+
+Selector dependency: the block-sparse selector (method under review) is a source dependency. Set `SELECTOR_ROOT` to its checkout; `src/specdec/models/selector.py` is the only module allowed to import it, and it documents the runtime assumptions it relies on. This venv mirrors that repo's dependency pins (see the pyproject comment); keep them in sync when bumping. That repo has no build-system, so an editable install is not possible.
 
 No linter is configured.
 
