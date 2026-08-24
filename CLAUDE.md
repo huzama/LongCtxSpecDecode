@@ -11,14 +11,18 @@ Research codebase for long-context speculative decoding built on sparse attentio
 - Only `/shared` is NFS-mounted across servers `srv01`-`srv09`. A checkout under `/shared/...` is visible from every server; a checkout anywhere else (home directory, local disk) exists only on that server and does not sync. Keep this repository under `/shared` if you run on more than one server.
 - Paths are user-specific. Never assume another user's checkout location; resolve the repo root at runtime with `pwd` or `git rev-parse --show-toplevel`.
 - Always invoke Python via the repo venv interpreter `.venv/bin/python`, resolved to an absolute path whenever you are outside the repo root or on a remote shell. Never `uv run`, never a system `python`. `uv` is for environment management only (`uv sync`, `uv add`).
-- Remote execution: each `ssh srv0X "..."` starts a fresh login shell in `$HOME`; the local cwd does not carry over. Resolve the repo root locally, then use it inside the quoted command (double quotes so the variable expands locally):
+- GPU work always runs as a slurm job or job step, never bare on a node. Slurm assigns the GPU; never set `CUDA_VISIBLE_DEVICES` manually. `ssh` is for CPU-side checks only.
 
 ```bash
 # REPO = absolute path of this checkout, resolved locally by git.
-# Must be under /shared to exist on the remote. Run as ONE command:
-# shell variables do not survive across separate shell invocations.
-REPO=$(git rev-parse --show-toplevel) && \
-  ssh srv0X "cd $REPO && CUDA_VISIBLE_DEVICES=0 $REPO/.venv/bin/python -m <module> <args>"
+# Must be under /shared to exist on the target node.
+REPO=$(git rev-parse --show-toplevel)
+# Inside an existing reservation (job id from squeue --me):
+srun --jobid=<id> --overlap --chdir=$REPO $REPO/.venv/bin/python -m <module> <args>
+# New job when GPUs are free (one per node partition srv0X); multiple
+# concurrent jobs are fine while GPUs are available:
+srun -p srv0X --gres=gpu:1 --cpus-per-task=8 --mem=64G -t 4:00:00 \
+  --chdir=$REPO $REPO/.venv/bin/python -m <module> <args>
 ```
 
 ## Commands
@@ -43,6 +47,8 @@ Correctness gates. Run each before and after touching the code it covers:
 - `validate-scorers` proves block statistics keep the tail block, the Quest score genuinely upper-bounds the true query-key product inside every block, and the oracle scores itself at exactly 1.0 recall and efficiency (CPU, synthetic). Covers `models/scorers.py` and `metrics/selection.py`.
 
 Selector dependency: the block-sparse selector (method under review) is a source dependency. Set `SELECTOR_ROOT` to its checkout; `src/specdec/models/selector.py` is the only module allowed to import it, and it documents the runtime assumptions it relies on. This venv mirrors that repo's dependency pins (see the pyproject comment); keep them in sync when bumping. That repo has no build-system, so an editable install is not possible.
+
+Vegas fork: the vLLM harness is a sibling checkout `../vegas` (fork of github.com/platformxlab/vegas) with its own venv inside it (Python 3.12, source build, CUDA 12.8, `TORCH_CUDA_ARCH_LIST=8.6`). Envs never mix: this repo's venv never imports vllm, and the fork's venv never runs this repo's CLI. Cluster GPUs are sm86, so vLLM uses its FA2 path there. The build plan and work order live in `notes/final/todo.md`.
 
 No linter is configured.
 
