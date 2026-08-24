@@ -13,7 +13,7 @@ Vegas ships as a vLLM fork with a plug-in point: `vllm/v1/spec_decode/sparse_att
 |---|---|
 | Checkout | sibling of this repo: `../vegas` (github.com/platformxlab/vegas, Apache-2.0) |
 | Env | own venv inside that checkout, Python 3.12, source build, CUDA 12.8, `TORCH_CUDA_ARCH_LIST=8.6`; build log at `build.log` there |
-| Our GPUs | RTX A6000, sm86, 48 GB. FA3 needs sm90, so vLLM runs its FA2 path here. Whether their verify-score collection exists in the FA2 path decides if the vegas baseline runs on our cards |
+| Our GPUs | RTX A6000, sm86, 48 GB, FA2 path. Stock vegas is Hopper-only (FA2 drops its `scores` argument and rejects its page-size-1 draft); our fork changes make it run here with faithful acceptance and a quantified speed handicap |
 | Model | Qwen3-4B, also in the vegas paper's lineup |
 | Their kernel dep | companion fork github.com/npz7yyk/vllm-flash-attn exposes a `scores` param on `flash_attn_varlen_func`; only the vegas overrider needs it |
 | Workload | long context, short generation: pg19/fineweb prompts at 32K-128K, generation up to 256 tokens. Their AIME'25 benchmark is the opposite shape (short prompts, 40K-token generations) and is out of scope |
@@ -24,7 +24,7 @@ Vegas ships as a vLLM fork with a plug-in point: `vllm/v1/spec_decode/sparse_att
 |---|---|---|
 | Selection signal needs an instrumented kernel | verify pass writes per-token logits or rematerialized weights via the FA fork | stock kernels on both passes; metadata scoring is backend-portable |
 | Score buffers scale with context | `_attn_score_buffer` is batch x heads x 2 x max_model_len bf16, ~0.5 GB at batch 32, 32 heads, 128K | per-page min/max key metadata, updated incrementally, read at 6.25% of KV per scoring event (fp16, block 16) |
-| Token-granular draft gather | draft k/v reshaped to page size 1; `_index_to_slot_kernel` builds slot-level page tables per layer | block-16 tables = vLLM pages, contiguous reads, stock paged kernel |
+| Token-granular draft gather, Hopper-only | draft k/v reshaped to page size 1, which only FA3 accepts (FA2 requires divisible-by-16); slot-level page tables per layer | block-16 tables = vLLM pages, contiguous reads, stock paged kernel |
 | Signal is one round stale | scores come only from the previous verify; no mid-burst refresh | bound is scored against the current draft query; rescoring is cheap |
 | Even prefill needs the patched kernel | their overrider collects scores during prefill (its prefill branch) to seed the first draft mask | our metadata update is plain tensor math over new keys; any prefill kernel works |
 | Budget fixed, global, offline | one `sparse_attn_ratio` for all layers, requests, and time | per-layer budgets with zero allowed; acceptance-driven online control. Their page tables already carry a layer dimension, and tables rebuild every propose, so both are graph-safe in their own design |
@@ -34,13 +34,13 @@ Vegas ships as a vLLM fork with a plug-in point: `vllm/v1/spec_decode/sparse_att
 
 | # | Task | Serves | Status |
 |---|---|---|---|
-| 0 | Build the fork in its own env on sm86 | harness | in progress |
-| 1 | Smoke on one A6000: `benchmarks/smoke_a6000.py` runs `vegas`, `streamingllm`, `off` with Qwen3-4B on pg19 32K prompts, 256 generated tokens | baselines run on our cards, our workload | next |
-| 2 | Absolute baseline table: vegas and streamingllm vs dense vLLM, 32K-128K, batch 1-32 | goal 2 | open |
-| 3 | Read `proposer.py` end to end; one-page design note: metadata placement (per-page min/max from keys seen at prefill and each verify), draft block-table build, cold-start path | design | open |
+| 0 | Build the fork in its own env on sm86 | harness | done |
+| 1 | Baseline modes on one A6000 with Qwen3-4B on pg19 prompts | baselines run on our cards, our workload | done: streamingllm and dense run; vegas cannot (see risks) |
+| 2 | Absolute baseline table: dense, streamingllm, and vegas, 32K-128K | goal 2 | done: [results](../work/results/fork-baseline-grid.md) |
+| 3 | Design note from reading `proposer.py`: metadata placement, block-table build, open choices | design | drafted: [note](../work/fork-overrider-design.md) |
 | 4 | Our overrider: stock verify, incremental metadata, top-k block table, fixed global ratio first | goal 1 | open |
 | 5 | Parity gate in the fork: ratio 1.0 must reproduce dense vLLM output | correctness rule | open |
-| 6 | Head-to-head at matched ratio: acceptance and throughput, short and long context | goal 2 | open |
+| 6 | Head-to-head at matched ratio: acceptance and throughput, short and long context. Bar set: recency 0.64-0.85 per-token acceptance, their signal 0.87-0.99 | goal 2 | open |
 | 7 | Per-layer budgets, zero allowed | goals 1 and 2 | open |
 | 8 | Acceptance-driven budget controller | goal 2 | open |
 | 9 | Attention-sublayer skip inside the draft pass | goal 1 | later |
@@ -69,10 +69,11 @@ Vegas ships as a vLLM fork with a plug-in point: `vllm/v1/spec_decode/sparse_att
 
 | Risk | Handling |
 |---|---|
-| Vegas baseline may not run on sm86 if score collection is FA3-only | ours needs stock kernels either way; streamingllm baseline runs regardless; vegas numbers then come from the paper until a sm90 card is available |
+| Stock vegas cannot run on sm86: FA2 silently drops its `scores` argument and rejects page-size-1 draft tables (both measured) | our fork changes run it anyway: emulated score rows plus a gather draft; acceptance faithful, speed carries one extra K read per verify |
 | Fork is frozen at its base vLLM; upstream moves | pin to their base for the whole project |
 | Layer tracking by call count breaks on non-uniform models | stay on Qwen3, same as them |
 | Full-budget parity may be subtle across spec and non-spec paths | that is what task 5 exists for; no speed claim before it passes |
+| Benchmark contamination on shared nodes | cells run serially with a drain wait between them; concurrent shards distorted CPU-bound cells by up to 6x |
 
 ## Pointers
 
