@@ -1,23 +1,14 @@
-# Single source of truth for the survey bibliography.
-# Edit this file, then run build.py (with the repo venv interpreter) to
-# regenerate bibliography.md. Never edit that generated file by hand.
+# Literature for long-context speculative decoding: every paper we read,
+# grouped by method family with a verdict per family, then the findings the
+# survey settled on. Hand-maintained; this file is the single source.
 #
-# Fields: name, arxiv (or url), year, venue (optional), family (key below),
-#   summary, lossless (true/false/"~"/omit), max_ctx (max context evaluated),
-#   acceptance, speedup, note (long-context behavior / caveat).
+# Paper fields: name, arxiv (or url), year, venue (optional), family (key
+#   below), summary, lossless (true/false/"~"/omit), max_ctx (max context
+#   evaluated), acceptance, speedup, note (long-context behavior or caveat).
 # "~" lossless = conditional (lossy mode, or lossless w.r.t. a modified target).
-
-title: "Annotated Bibliography by Method Family"
-
-preamble: |
-  *Reference material; do not read linearly. Each family opens with its verdict;
-  that is the takeaway. Pull individual papers only when an idea or experiment needs them.*
-
-  **Two regimes with opposite physics.** Short-context decoding is weight-bound
-  (EAGLE-3/DFlash arms race, 5–7x). Long-context decoding is KV-bound for MHA/GQA,
-  where short-trained heads go *sub-1x*. Every family verdict is relative to the
-  32K–1M input / long-generation regime. Acceptance cells use α = rate, τ = accepted
-  length (tokens/round); they are not comparable across papers without the qualifiers.
+#
+# Read the family verdicts first; pull individual papers only when an idea or
+# experiment needs them.
 
 families:
   - key: independent
@@ -1220,3 +1211,439 @@ papers:
     family: serving
     summary: "Bandit over several parameter-free draft-stopping rules"
     note: "Hyperparameter-free by construction; controls γ only, never the KV budget"
+
+# ---------------------------------------------------------------------------
+# Findings: what the survey concluded. Settled is the floor, contested is where
+# the open questions are, arithmetic says which can pay off, ideas are the bets
+# and the kills. IDs are stable; append, never renumber.
+# ---------------------------------------------------------------------------
+findings:
+  regimes: >-
+    Two regimes with opposite physics. Short-context decoding is weight-bound
+    (EAGLE-3/DFlash arms race, 5-7x). Long-context decoding is KV-bound for
+    MHA/GQA, where short-trained heads go sub-1x. Every verdict below is
+    relative to the 32K-1M input regime. Acceptance cells use alpha = per-token
+    rate, tau = accepted tokens per round; not comparable across papers without
+    the qualifiers.
+
+  settled:
+    - id: 1
+      fact: Short-trained draft heads fail at long context
+      evidence: >-
+        EAGLE-3 tau 1.28, 0.81x on 4K-64K (OWL 2510.07535); vanilla SD tau
+        0.5-0.6 at 16K (2505.20776); naive sparse drafter ~0% alpha by 8K
+        (2606.00144); vLLM/SGLang consensus that EAGLE-family decays past the
+        trained window.
+    - id: 2
+      fact: >-
+        At long context plus batch, MHA/GQA decode is KV-bandwidth-bound, and
+        that is an opportunity: speedup grows with batch and context
+      evidence: >-
+        MagicDec 2.51x at batch 32-256 (2408.11049); QuantSpec 1.35x at 4K to
+        2.49x at 128K (2502.10424); SpecPV 2.88x at 10K to 6.29x at 60K
+        (2512.02337); roofline validated to 3% vs VeriCache 25ms at 500K.
+    - id: 3
+      fact: >-
+        The converged recipe: draft against the target's own sparse, compressed,
+        or retrieved state, verify full-KV, lossless
+      evidence: TriForce, MagicDec, LongSpec, QuantSpec, Vegas, PillarAttn, SparseSpec-L, VeriCache all instantiate it.
+    - id: 4
+      fact: Selection mechanism matters more than budget; attention retrieval holds, permanent eviction collapses
+      evidence: >-
+        TriForce at 120K needle: retrieval 0.9878 vs StreamingLLM 0.0519, H2O
+        0.0739; SnapKV beats StreamingLLM at equal budget (MagicDec).
+    - id: 5
+      fact: Quantized drafter KV is acceptance-robust; sparse token dropping is not
+      evidence: >-
+        QuantSpec acceptance rises to 94.31% at 128K; quantized beats sparse for
+        draft-target agreement; VeriCache sustains 25-40 tokens per round at 4x
+        compaction.
+    - id: 6
+      fact: Verification attention is a free importance oracle for drafting
+      evidence: >-
+        Vegas, PillarAttn, SparseSpec-L, SpecExtend recycle it at near-zero
+        cost; beats static budgets on shifting saliency (SparseSpec 1.36x over
+        MagicDec, 1.76x over TriForce).
+    - id: 7
+      fact: Zero-KV retrieval drafting beats trained heads on long grounded inputs
+      evidence: >-
+        OWL third-party: PLD tau 2.75, TR 3.16, SAMD 3.18, SuffixDecoding 3.41,
+        SAMD+TR 4.98 vs EAGLE-3 1.28.
+    - id: 8
+      fact: Accepted tokens per iteration are log-bounded in verifier capacity
+      evidence: 2512.11718, tight vs EAGLE-3; giant trees have sharply diminishing returns.
+    - id: 9
+      fact: Fixed draft length is wrong
+      evidence: >-
+        Optimal draft length shifts with batch (2310.18813), load (2406.14066),
+        precision (2605.02888); the optimal policy is a threshold stopping rule
+        (2405.19715).
+    - id: 10
+      fact: Batched speculation was silently incorrect in major open-source stacks as late as 2025
+      evidence: 2510.22876; gains compress at production concurrency (Meta 1.4-2.0x; P-EAGLE +5-25% at c=64).
+    - id: 11
+      fact: MLA changes the physics
+      evidence: >-
+        Arithmetic intensity over 100x MHA, toward compute-bound (2507.15465);
+        MLA KV 69KB per token vs Qwen3-32B 256KB; DeepSeek shipped
+        weight-amortizing MTP (1.8x), not KV-sparse drafting, correctly per the
+        arithmetic.
+    - id: 12
+      fact: No published acceptance or speedup datapoint exists past 128K, in any family
+      evidence: >-
+        TriForce (2024) and QuantSpec remain the high-water marks; Windowed-MTP
+        (2607.21535) is the lone 1M draft-KV datapoint, window-local MTP heads
+        only.
+    - id: 13
+      fact: Training-free query-aware selection matches trained selection at moderate density
+      evidence: >-
+        Matched budget at K=0.5L, our selector vs Twilight vs Quest: RULER
+        .988/.975/.988, BABILong .330/.303/.330, inside bootstrap error. NSA at
+        2560 activated tokens: Quest .392 vs oracle top-k .423. A trained indexer
+        beats mean-pooled blocks by 1.51 LongBench points. Separation appears only
+        at aggressive budgets: AIME-24 at 2K, Quest 18.15 vs dense 74.48. Our own
+        measurement: the min/max bound beats a trained selector past its training
+        length (+0.061 to +0.081 mass efficiency at 32K) and loses inside it.
+    - id: 14
+      fact: Untrained early exit through the model's own head is broken; it is the logit lens
+      evidence: >-
+        Tuned Lens (2303.08112): no interpretable predictions before layer 21 of
+        32, bias 4-5 bits from hidden-state covariance drift. SimLens
+        (2507.17618): mean accuracy 0.251. PPD (2307.05908): 21.6-38.9% top-1
+        agreement at half depth, which the speedup formula turns into ~0.90x.
+        Layer skipping escapes this by keeping the final layers.
+    - id: 15
+      fact: Under batching, neuron sparsity vanishes and attention-head sparsity survives
+      evidence: >-
+        Polar Sparsity (2505.14884), the only sweep from batch 1 to 512: the
+        union of active MLP neurons across a batch goes dense; head sparsity is
+        batch-invariant.
+    - id: 16
+      fact: Skipping an attention sublayer removes its KV as well as its weights
+      evidence: >-
+        LLM-Drop (2406.15786): attention is 3-4x more redundant than MLP, and
+        dropping 20 of 40 attention sublayers is also a ~50% KV cut. The only
+        depth mechanism that touches the term dominating at batch and length.
+    - id: 17
+      fact: Sparse attention inflates generation length
+      evidence: >-
+        Quest at a 2K budget on AIME-24 generates 30.0K tokens against 14.8K
+        dense (+103%). Any sparse-attention throughput claim must report tokens
+        generated; lossless speculation is immune by construction.
+    - id: 18
+      fact: >-
+        Self-speculation with a recency mask pays on Ampere-class hardware once
+        context or batch is nontrivial, and the drafter step cost is the lever
+      evidence: >-
+        Our vegas-fork grid, Qwen3-4B, one A6000, serial cells: 1.18x at 32K
+        batch 4, 1.12x at 64K batch 2, 1.09x at 128K batch 1, 0.75x at 32K batch
+        1. Per-token acceptance 0.64-0.85 for recency, 0.87-0.99 for
+        verification-guided selection. Draft step costs ~0.8 of a dense step for
+        a 7% KV read whose bandwidth floor is ~0.1.
+    - id: 19
+      fact: Vegas as released is Hopper-only twice over
+      evidence: >-
+        Its FA2 op silently drops the scores argument (FA3 only) and FA2 rejects
+        its page-size-1 draft tables. Made to run on sm86 with emulated score
+        rows and a gather draft: acceptance reproduces the paper (tau 6.14 on
+        their AIME benchmark shape vs their ~6.1), speed does not (0.24-0.90x
+        across regimes on one A6000).
+
+  contested:
+    - id: 1
+      question: Does acceptance decay with context length?
+      side_a: "OWL: EAGLE-3 collapses (tau 1.28, 0.81x)"
+      side_b: "MiniMax-M3 blog: AL flat 2.64 to 2.63 from 1K to 32K; unverifiable"
+      verdict: >-
+        A property of draft-state construction (shared/quantized/retrieved holds
+        to 128K; evicted/short-trained collapses by 8-32K) plus training
+        coverage. No law; measure per checkpoint.
+    - id: 2
+      question: Must the sparse budget grow with context?
+      side_a: "Vegas: fixed budgets underperform at extreme scale"
+      side_b: "Windowed-MTP (2607.21535): constant sink+window suffices at 1M for MTP heads"
+      verdict: >-
+        Likely drafter-family- and task-dependent. Our grid: acceptance rises with
+        context at a fixed 7% ratio for both recency and verification-guided
+        selection, so budgets can loosen, not tighten, with length.
+    - id: 3
+      question: Is sparse verification's quality loss negligible?
+      side_a: "Dustin / 2512.21911: yes, empirically at 32K"
+      side_b: "SpecPV's own tables: ROUGE-L -27% on GovReport while QA stays within 1-3%"
+      verdict: Uncertified either way; no KV-budget-to-divergence bound exists (idea 2).
+    - id: 4
+      question: Does dynamic layer skip beat static at long inputs?
+      side_a: Dynamic should adapt
+      side_b: "KnapSpec: CLaSp (dynamic) 1.22x below SWIFT (static) 1.33x at 16K; DEL fails to accelerate base models"
+      verdict: Dynamic is not better.
+    - id: 5
+      question: Is verification free at scale?
+      side_a: "Memory-bound argument: extra verify tokens ride along"
+      side_b: "Holds only while B(L+1) < ridge (~296 FLOP/B on H100, breaks at B>59, L=4); 3 of 5 consumer configs decelerate (2607.17283)"
+      verdict: Long context re-anchors memory-boundedness; short context plus big batch does not.
+    - id: 6
+      question: Do diffusion drafters survive long context?
+      side_a: DFlash decays to tau 2.09 at 32K zero-shot
+      side_b: A 1.6K-sample fine-tune recovers tau 3.56
+      verdict: Data patch or architectural limit? No data past 32K.
+    - id: 7
+      question: "KV-reuse drafting: principle vs wall clock"
+      side_a: "KVShot (2604.26412): reading target KV improves long-range acceptance"
+      side_b: "End-to-end speedup marginal: shallow drafters cannot estimate target queries"
+      verdict: Contested whether block-wise training fixes it.
+    - id: 8
+      question: Thin-evidence zones
+      side_a: ""
+      side_b: ""
+      verdict: >-
+        SSM drafters past 8K: nothing; cross-tokenizer at length: nothing; MTP
+        acceptance vs length in production: never published; 256K-1M: nothing;
+        StreamServe's 11-18x rests on implausible baselines.
+    - id: 9
+      question: Does speculation pay at rollout-scale batch?
+      side_a: "MagicDec: yes above S_inflection, 2.51x at batch 32-256; EfficientRollout (2606.18967): batches drain as sequences finish"
+      side_b: "verl measures ~50% rollout throughput loss with MTP; SpecActor (2511.16193): no or negative speedup at batch 256"
+      verdict: >-
+        Unresolved in the literature. Our grid says the sign flips positive at
+        batch 2-4 on an A6000 once measured serially; larger batch untested.
+    - id: 10
+      question: Does speculation give RL training what it needs?
+      side_a: Rejection sampling preserves the target distribution exactly
+      side_b: "It preserves the engine's distribution, not the trainer's; enabling it zeroes generation logprobs (NeMo-RL PR 1785)"
+      verdict: >-
+        Both true. A lossless verifier computes exact target logprobs anyway, so
+        exposing them dissolves the conflict.
+
+  arithmetic:
+    constants: >-
+      H100 3.35TB/s, 990 TF BF16, ridge 296 FLOP/B. Model validated to 3% vs
+      VeriCache. Speedup = tau / (gamma * c + 1), c = draft step cost relative
+      to a dense step.
+    rows:
+      - id: 1
+        question: KV per token
+        math: >-
+          Qwen3-32B 256KB per token gives 8.6/34.4/137/275 GB at 32K/128K/512K/1M;
+          Llama-3.1-8B 128KB; DeepSeek MLA 69KB; Qwen3-1.7B and 0.6B both 112KB
+          (GQA floors at 8 kv heads); Qwen3-4B 144KB.
+        verdict: Small GQA models do not have small KV; a full-KV drafter is +44% KV per request.
+      - id: 2
+        question: "Weights vs KV: which term dominates?"
+        math: >-
+          At B=1, 128K a GQA 32B is still weight-dominated (KV 34% of bytes); KV
+          dominates at (B>=8, 128K+) or (B=1, 512K+).
+        verdict: Which term to attack depends on (B, S).
+      - id: 3
+        question: Independent full-KV drafter
+        math: c tends to 0.4375 as B*S grows.
+        verdict: Speedup ceiling 1.09x even at perfect acceptance; dead twice.
+      - id: 4
+        question: Sparse-KV drafter (4K budget)
+        math: c = 0.039 at 128K B1, 0.016 at 128K B32; 3.85x at tau 4.1, B32, 128K.
+        verdict: Speedup approaches tau monotonically with S and B.
+      - id: 5
+        question: Layer skip
+        math: c = 1-k, S-invariant; 50% skip at tau 3, gamma 4 gives 1.00x; matching a 4K sparse draft at 128K B8 needs 78% skip.
+        verdict: Reproduces the whole literature (KnapSpec 1.47x cap); 78% skip is acceptance-fatal.
+      - id: 6
+        question: Verify dominance
+        math: >-
+          With cheap drafting, verification is 85-95% of round time; ceiling tau
+          * BW / (W + S * kvB): Qwen3-32B B1 gives 135/101/49/30 tok/s at 1M
+          (tau 3).
+        verdict: tau is log-bounded, so lossless verify-byte reduction is the frontier, not better drafting.
+      - id: 7
+        question: Layer-skip times sparse-KV composition
+        math: Multiplicative in cost, sub-additive in speedup (B32, 1M 2.87x to 2.93x); acceptance multiplies down (0.9*0.85 gives tau -23%).
+        verdict: Can be net-negative; the niche is batch 1 at 512K-1M.
+      - id: 8
+        question: Self-spec regime gate
+        math: Wins iff B*S*kvB > W; S_inflection = 256K/B for Qwen3-32B (B8 gives 32K); ~26K for an MHA 7B.
+        verdict: Explains why TriForce used MHA and MagicDec needs batch 32+.
+      - id: 9
+        question: MLA targets
+        math: KV is 1.4-30% of decode bytes at B1-32 up to 128K; sparse-KV drafting max gain 1.01-1.43x.
+        verdict: Weight-amortizing MTP is the only lever there; KV-centric research does not transfer.
+      - id: 10
+        question: Batch ceiling
+        math: Verify exits memory-bound at B(gamma+1) around 296; long context postpones the ridge.
+        verdict: Speculation and batching are complementary at 128K-1M where they conflict at 4K; gamma must shrink with B.
+      - id: 11
+        question: Attention-sublayer skip vs uniform layer skip
+        math: >-
+          Skipping a fraction s of attention sublayers scales the draft's KV
+          read by (1-s): draft cost = (W - s*W_attn) + (1-s)*p*B*S*kvB. At
+          s=50%, p=10%, gamma 8, tau 6.1 (Qwen3-4B): 2.02 to 2.44x at B32/8K,
+          3.24 to 4.13x at B128/32K.
+        verdict: +21-28%, not row 7's +2%; the depth axis survives only in the attention-sublayer form composed with per-layer KV budgets.
+      - id: 12
+        question: Byte split across (batch, context)
+        math: Qwen3-4B KV share of decode bytes 7/13/38% at B1 (4K/8K/32K); 71/83/95% at B32; 91/95/99% at B128.
+        verdict: Above batch ~8 the KV term is the only one worth attacking.
+      - id: 13
+        question: Scoring-cost floor
+        math: >-
+          Block-16 fp16 min/max metadata reads 6.25% of KV per scoring event
+          (caps sparse speedup at 16x whatever the budget); INT4 metadata 1.6%;
+          a full query-aware K pass reads 100% (measured: erases the speculation
+          gain at 128K).
+        verdict: Metadata scoring is the cheap query-aware signal; kernel-free full-K scoring is not.
+
+  ideas_kept:
+    - id: 15
+      idea: "Training-free depth-profiled KV budgets: per-layer coverage, zero allowed"
+      audit: open
+      note: >-
+        Skipping an attention sublayer and giving a layer budget zero are one
+        knob at two settings; composed with per-layer coverage worth +21-28% at
+        batch (arithmetic 11), no training anywhere. Neighbors: SqueezeAttention
+        (across layers, outside speculation), KnapSpec (binary skip, batch 1),
+        SPIRe (trained at 67M, 512 tokens).
+      kill_test: >-
+        Zero one layer band at a time at 32K, measure alpha and step time; an
+        allocated draft must beat flat sparse drafting by >=15% throughput at
+        equal alpha, and some band must tolerate zero.
+    - id: 1
+      idea: "Both-sides-sparse: sparse draft plus sparse verify via an external selector oracle"
+      audit: partially-solved
+      note: >-
+        Every verification-recycled drafter structurally requires full-KV
+        verification for its signal; a third-party importance oracle breaks
+        that circularity. Baselines: Vegas plus Dustin, never composed; SSV.
+      kill_test: Selector-restricted verify at 12.5% budget; acceptance holds within ~5% or the circularity is confirmed.
+    - id: 2
+      idea: "Divergence certification: KV budget to output-distribution bound"
+      audit: open
+      note: Turns Dustin's unfalsifiable negligible-loss claim into a knob; feeds ideas 1 and 3.
+      kill_test: Attention-mass captured vs realized KL at 32K; one strong correlation plot validates the program.
+    - id: 3
+      idea: Acceptance-vs-(budget, length) surface, 128K-1M
+      audit: partially-solved
+      note: Reconcile Vegas (budget must grow) vs Windowed-MTP (constant window suffices at 1M).
+      kill_test: Fit alpha(B, L) over 32K/128K/256K times budgets; sublinear vs linear vs task-forked.
+    - id: 4
+      idea: EAGLE-3/MTP acceptance vs KV-quantized targets, the production config
+      audit: open
+      note: Zero published acceptance data for FP8-KV target plus EAGLE-3.
+      kill_test: 70B plus EAGLE-3, KV in BF16/FP8/INT8, contexts 4K-64K, four tasks.
+    - id: 5
+      idea: Staleness and refresh policy for verification-recycled importance
+      audit: open
+      note: SparseSpec-L caps at 128 tokens; PillarAttn fixes k=8 with no ablation.
+      kill_test: Freeze indices for 8-1024 steps; plot acceptance vs staleness.
+    - id: 6
+      idea: Adaptive full-verification triggering for partial verification
+      audit: open
+      note: Replace SpecPV's fixed refresh with an online divergence trigger from captured attention mass.
+      kill_test: Attention-mass-missed vs realized drift on GovReport (cliff) vs QA (safe).
+    - id: 7
+      idea: Length-robust trained sparse-KV drafting past 32K
+      audit: open
+      note: BudgetDraft's 16K collapse is a position-range artifact begging for Anchor-Offset positions.
+      kill_test: Retrain BudgetDraft 68M with Anchor-Offset at 32K; does 16K acceptance move off ~18%?
+    - id: 8
+      idea: Online (drafter KV budget times gamma) controller driven by measured acceptance
+      audit: open
+      note: >-
+        The gamma axis is covered (Nightjar, FASER, BanditSpec, TapOut, GammaTune,
+        SmartSpec); the budget axis is untouched at runtime. Vegas sweeps offline,
+        SSV switches among profiled candidates, SparseSpec-L tunes only gamma.
+        Mechanism: score every budget arm from one verification pass (Not-a-Bandit
+        2510.20064, full information). A wrong arm costs throughput, never
+        output, because verification is lossless.
+      kill_test: Recover >=90% of oracle fixed-budget throughput with no offline sweep, never trailing fixed by more than 5%.
+    - id: 9
+      idea: Self-speculation for sequential-hybrid and SSM targets
+      audit: partially-solved
+      note: LayerSkip-style training on a hybrid checkpoint; ReplaySSM covers separate-path rollback only.
+      kill_test: LayerSkip finetune on a 0.5-1B hybrid; does alpha recover from 0.038?
+    - id: 10
+      idea: No-regret draft-path adaptation over 30K-100K generations
+      audit: partially-solved
+      note: Bandit methods exist but none handle combinatorial path selection under self-generation drift.
+      kill_test: EXP3 budget selection on 13K-token AIME traces vs fixed.
+    - id: 11
+      idea: SSM and linear-attention drafter acceptance past 8K
+      audit: open
+      note: Mamba Drafters stop at 8K.
+      kill_test: Mamba-130M plus Llama-3.1-8B on LongSpecBench at 128K vs OWL-LSTM.
+
+  ideas_rejected:
+    hypotheses:
+      - id: H1
+        claim: Long-context speculative decoding is fundamentally KV-limited
+        verdict: nuanced, sign error
+        correction: >-
+          KV-boundedness is the opportunity; the real limits are the full-KV
+          verify pass and the log(P) acceptance ceiling. On MLA it is the weight
+          term.
+      - id: H2
+        claim: An extra drafter makes it worse because its KV grows too
+        verdict: refuted
+        correction: >-
+          Constant-KV, O(1)-state, and zero-KV drafter classes all exist. The
+          real killer is acceptance collapse from short training.
+      - id: H3
+        claim: Only self-spec, early exit, and sparse drafting are viable
+        verdict: refuted as only
+        correction: >-
+          Draft against the target's own state, a class that includes retrieval,
+          RAG, and O(1)-state drafters. Early exit is the weakest member.
+      - id: H4
+        claim: Acceptance holds or fails uniformly with context
+        verdict: bifurcates
+        correction: >-
+          By draft-state construction: shared/quantized/retrieved holds to 128K;
+          evicted/short-trained collapses by 8-32K. Nothing measured at 256K-1M.
+    directions:
+      - id: 0
+        direction: "Early-exit both-sides-sparse: depth-profiled budgets behind an exit head"
+        kill: >-
+          Four independent kills: an untrained exit head is the logit lens
+          (settled 14); a trained exit head does not survive length (our alpha
+          grid on LayerSkip checkpoints: dead at 64K at every depth); the axis
+          pays <=18% where the method is aimed (arithmetic 12); modern
+          checkpoints have no depth redundancy (oracle skip 0% for Qwen3-8B,
+          2603.23701).
+        salvage: The intent survives as per-layer KV budget with zero allowed (idea 15).
+      - id: 12
+        direction: 2D (layer times KV-budget) knapsack drafter
+        kill: Composition adds ~2% at B>=8, 128K under uniform skip and acceptance multiplies down (arithmetic 7).
+        salvage: Partly superseded by the attention-sublayer form (arithmetic 11), now idea 15.
+      - id: 13
+        direction: Layer-skip and early-exit acceptance curves 64K-1M plus LayerSkip training at 128K
+        kill: Ceiling ~1.5x (arithmetic 5); a measurement, not a project.
+        salvage: A section inside another paper.
+      - id: 14
+        direction: Layer-skip self-spec under continuous batching
+        kill: Serving-engineering project on a 1.5x-capped direction.
+        salvage: Only if idea 12's niche pans out.
+
+  risks:
+    - id: 1
+      risk: Lossless headroom nearly exhausted
+      hedge: The frontier is the verify side (ideas 1 and 2).
+    - id: 2
+      risk: Architecture ground shifting to MLA and sequential hybrids
+      hedge: Idea 9 is the transfer play; measurement ideas stay valid on the deployed GQA fleet.
+    - id: 3
+      risk: Field converged fast and crowded
+      hedge: Position explicitly against each named neighbor.
+    - id: 4
+      risk: Lossy verification becomes the accepted norm
+      hedge: Certification (idea 2) is the entry ticket either way.
+    - id: 5
+      risk: Headline regime 256K-1M experimentally inaccessible
+      hedge: Offloaded verify reaches 256K on two GPUs; claim only what we measure.
+    - id: 6
+      risk: Acceptance is checkpoint-idiosyncratic
+      hedge: Evaluate on multiple checkpoints; never a universal claim.
+    - id: 7
+      risk: Serving reality compresses gains 2-3x to 1.4-2.0x
+      hedge: Design batch-compatible from day one.
+    - id: 8
+      risk: The cheap baselines are embarrassing (PLD, SAMD, SuffixDecoding, tau 2.75-4.98)
+      hedge: Benchmark against SAMD+TR and HOWL from day one.
+    - id: 9
+      risk: The large-batch regime may not admit speculation
+      hedge: Measure the crossover; our grid shows it positive at batch 2-4 on an A6000, larger batch open.
