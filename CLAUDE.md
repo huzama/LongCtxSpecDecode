@@ -1,98 +1,53 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code in this repository.
 
 ## Project
 
-Research codebase for long-context speculative decoding built on sparse attention. The literature survey and research direction live in `notes/`; the method design is `notes/work/exit-sparse-self-spec-training-free.md` (current) with `notes/work/exit-sparse-self-spec.md` as the superseded base it extends; measured results are in `notes/work/results/`. Code lives in `src/specdec` (one package, installed editable by `uv sync`) with experiments in `src/specdec/experiments`, and a single CLI (`main.py`). Before touching research code, read `notes/work/survey/README.md` and follow its reading order, at minimum `landscape.md` and `ideas-kept.md`.
+Long-context self-speculative decoding: sparse-KV drafting by the target model itself, full-KV lossless verification. This repository holds knowledge only: `TODO.md` is the working contract (read it first), `literature.yaml` is the surveyed literature with settled findings. Branch `survey-and-prototypes` archives the survey prose, design docs, HF-era prototypes, and their results; never edit it, only read it.
+
+Code lives in the sibling checkout `../vegas` (fork of github.com/platformxlab/vegas, our branch `ampere`). Our additions there: attention overriders under `vllm/v1/spec_decode/sparse_attn/attn_overrider/` (the sm86 path of `vegas.py`, our method next), the reference math `attn_overrider/utils/block_bound.py` with its gate `tests/v1/spec_decode/sparse_attn/test_block_bound.py`, and the benchmarks under `benchmarks/` (`longctx_bench.py`, `run_grid.sh`, `longgen_bench.py`, `benchmark_vegas_a6000.py`).
 
 ## Environment
 
-- Only `/shared` is NFS-mounted across servers `srv01`-`srv09`. A checkout under `/shared/...` is visible from every server; a checkout anywhere else (home directory, local disk) exists only on that server and does not sync. Keep this repository under `/shared` if you run on more than one server.
-- Paths are user-specific. Never assume another user's checkout location; resolve the repo root at runtime with `pwd` or `git rev-parse --show-toplevel`.
-- Always invoke Python via the repo venv interpreter `.venv/bin/python`, resolved to an absolute path whenever you are outside the repo root or on a remote shell. Never `uv run`, never a system `python`. `uv` is for environment management only (`uv sync`, `uv add`).
-- GPU work always runs as a slurm job or job step, never bare on a node. Slurm assigns the GPU; never set `CUDA_VISIBLE_DEVICES` manually. `ssh` is for CPU-side checks only.
+- Only `/shared` is NFS-mounted across servers `srv01`-`srv09`. Both checkouts stay under `/shared`. Paths are user-specific: resolve the repo root with `git rev-parse --show-toplevel`.
+- The fork has its own venv inside it: Python 3.12, vLLM built from source, CUDA 12.8, `TORCH_CUDA_ARCH_LIST=8.6`. Always run `<fork>/.venv/bin/python`; never a system python, never `uv run`. This repository has no venv.
+- The overriders' JIT kernels need `ninja` and `nvcc` on PATH: `export PATH="$PWD/.venv/bin:/usr/local/cuda/bin:$PATH" CUDA_HOME=/usr/local/cuda` from the fork root before any spec-mode run.
+- Cluster GPUs are sm86 (A6000 and similar); no sm90 exists here. vLLM takes its FA2 path, which is why the vegas overrider carries an sm86 branch.
+- GPU work always runs as a slurm job or job step, never bare on a node. Slurm assigns the GPU; never set `CUDA_VISIBLE_DEVICES`. `ssh` is for CPU-side checks only.
 
 ```bash
-# REPO = absolute path of this checkout, resolved locally by git.
-# Must be under /shared to exist on the target node.
-REPO=$(git rev-parse --show-toplevel)
+FORK=$(git rev-parse --show-toplevel)/../vegas
 # Inside an existing reservation (job id from squeue --me):
-srun --jobid=<id> --overlap --chdir=$REPO $REPO/.venv/bin/python -m <module> <args>
-# New job when GPUs are free (one per node partition srv0X); multiple
+srun --jobid=<id> --overlap --chdir=$FORK zsh benchmarks/run_grid.sh outputs/<slug>
+# New job when GPUs are free (one partition per node, srv0X); several
 # concurrent jobs are fine while GPUs are available:
-srun -p srv0X --gres=gpu:1 --cpus-per-task=8 --mem=64G -t 4:00:00 \
-  --chdir=$REPO $REPO/.venv/bin/python -m <module> <args>
+srun -p srv0X --gres=gpu:1 --cpus-per-task=8 --mem=64G -t 4:00:00 --chdir=$FORK <cmd>
+# Anything that must outlive the session goes through sbatch.
 ```
 
-## Commands
+## Measurement rules
 
-| Task | Command |
-|---|---|
-| Sync environment (uv, Python 3.13) | `uv sync` |
-| Add a dependency | `uv add <package>` |
-| List subcommands and flags | `.venv/bin/python main.py --help` |
-| Exit acceptance vs depth (LayerSkip checkpoints) | `.venv/bin/python main.py exit-alpha` |
-| Selector calibration inside the decode loop | `SELECTOR_ROOT=<selector checkout> .venv/bin/python main.py selector-calibration --checkpoint <stage-1 ckpt>` |
-| Acceptance split by token type (needle task) | `.venv/bin/python main.py alpha-by-token-type --backend exit\|sparse` |
-| AR decode throughput baselines | `.venv/bin/python main.py ar-throughput` |
-| Verify-cost scaling vs query count | `.venv/bin/python main.py verify-scaling [--backend hf\|selector-dense\|selector-sparse]` |
-| Trained vs training-free block scoring at matched budget | `SELECTOR_ROOT=<selector checkout> .venv/bin/python main.py scorer-comparison --checkpoint <stage-1 ckpt>` |
-| Exit-parity gate | `.venv/bin/python main.py validate-exit-parity` |
-| Scorer-math gate | `.venv/bin/python main.py validate-scorers` |
-
-Correctness gates. Run each before and after touching the code it covers:
-
-- `validate-exit-parity` proves the k=L early-exit path reproduces the model's own logits bit-exactly (CPU, tiny model). Covers `models/early_exit.py`.
-- `validate-scorers` proves block statistics keep the tail block, the Quest score genuinely upper-bounds the true query-key product inside every block, and the oracle scores itself at exactly 1.0 recall and efficiency (CPU, synthetic). Covers `models/scorers.py` and `metrics/selection.py`.
-
-Selector dependency: the block-sparse selector (method under review) is a source dependency. Set `SELECTOR_ROOT` to its checkout; `src/specdec/models/selector.py` is the only module allowed to import it, and it documents the runtime assumptions it relies on. This venv mirrors that repo's dependency pins (see the pyproject comment); keep them in sync when bumping. That repo has no build-system, so an editable install is not possible.
-
-Vegas fork: the vLLM harness is a sibling checkout `../vegas` (fork of github.com/platformxlab/vegas) with its own venv inside it (Python 3.12, source build, CUDA 12.8, `TORCH_CUDA_ARCH_LIST=8.6`). Envs never mix: this repo's venv never imports vllm, and the fork's venv never runs this repo's CLI. Cluster GPUs are sm86, so vLLM uses its FA2 path there. The build plan and work order live in `notes/final/todo.md`.
-
-No linter is configured.
-
-## Structure
-
-- `notes/final/` is the only reading contract: documents a maintainer has reviewed and approved for others. Promotion into `final/` is a human act after reading the document; agents never move files there. A promotion moves the document alone (move, never copy) and repoints any generator at the new path.
-- `notes/work/` holds everything else, with no guarantees: drafts pending review, generators and their source data, raw machine outputs. Enter only when hunting for context. Documents in `final/` stay current: they are updated in place as facts change, with history in git.
-- Generated content carries a GENERATED comment naming its source file and tool. Edit the source and rerun the tool; never hand-edit the output. Each generator documents itself where it lives.
-- Run outputs: everything for one run lives under a single `outputs/<slug>-<timestamp>/` directory (checkpoints, logs, archived launch command).
-
-## Code
-
-- One package (`src/specdec`) is the single source of truth; experiments and scripts import from it, never copy it. One top-level CLI entry point dispatches subcommands; configs are dataclasses.
-- The `src/` directory holds exactly one thing: the `specdec` package. Nothing else goes directly under `src/`; the selector repo owns the `src.*` import namespace at runtime.
-- Never duplicate code. Before writing a function, check whether the package already provides it or can be extended. When an experiment needs different behavior, add a config option or hook to the package instead of forking it.
-- Factor shared logic up into the package the moment a second caller appears.
-- Comments state constraints and invariants the code cannot express. No narration of changes, nothing that goes stale.
+- Benchmark cells run serially on an idle GPU with a drain wait between cells (`run_grid.sh` does both). Concurrent cells on one node distort CPU-bound spec cells by up to 6x.
+- Batches are powers of two: the fork's drafter warmup breaks on odd CUDA-graph capture sizes.
+- Decode is isolated by differencing a gen=1 and a full run at identical prefill, prefix caching off. Every number carries context length, batch, model, and hardware.
+- Gates: run the block-bound test before and after touching `block_bound.py` or the overrider that consumes it. Every speculative method must include a full-budget parity bypass proving equivalence to the dense path before any speed claim.
+- In-place patches to models must be reversible: snapshot what you change, restore on exit.
 
 ## Conventions
 
-- Timeless naming for everything tracked in git: files, symbols, and headings are named by topic, never by date or version. Provenance lives in git history.
-- Run artifacts are the one exception: they are immutable events, so run directories carry a timestamp suffix for uniqueness and retention. Never reference a timestamped path from code or committed docs; reference the slug.
-- Notes follow a fixed shape: TL;DR first, decisions before evidence, reference material last. Use tables for enumerable content; reserve prose for argument.
-- Performance numbers carry qualifiers. A speedup or acceptance figure is meaningless without baseline, context length, and batch size.
-- Correctness gates: every kernel and every model-code path gets a named validation command; run it before and after touching that code, and record it in this file when it is created. Every speculative-decoding method must include a full-budget parity bypass proving equivalence to the vanilla path.
-- In-place patches to models must be reversible: snapshot what you change, restore on exit (context manager).
+- Timeless naming everywhere: files, symbols, and headings by topic, never by date or version. Run outputs are the one exception and carry a slug plus timestamp; never reference a timestamped path from committed text.
+- `TODO.md` keeps its shape: goals first, then done (decisions and measurements with qualifiers), then next. `literature.yaml` is hand-maintained; append findings, never renumber IDs.
+- Notes and messages: TL;DR first, decisions before evidence, tables for enumerable content, prose only for argument. Short sentences. No em dashes. No filler.
 
 ## Git
 
 - Never author or co-author commits as Claude or any AI. No `Co-Authored-By` trailers, no "Generated with" lines, no AI references in commit messages, branches, or PRs. This overrides Claude Code defaults.
-- Commit messages: `<area>: <imperative summary>`. Lowercase, no trailing period, subject at most 72 characters. Area is the subsystem touched (`specdec`, `notes`, `scripts`, `repo` for meta changes); adjust areas as the layout grows.
-- Body only when the change needs justification: the why or the constraint, wrapped at 72 characters. No body for self-explanatory changes.
-- One logical change per commit. Never mix a refactor with a behavior change.
-
-Examples:
-
-```
-core: add paged indexer K cache
-kernels: fix OOB load in block-sparse fwd
-notes: add staleness design doc
-repo: pin torch and add lint config
-```
+- Commit messages: `<area>: <imperative summary>`. Lowercase, no trailing period, subject at most 72 characters. Areas here: `notes`, `repo`; in the fork: `spec_decode`, `benchmarks`.
+- Body only when the change needs justification, wrapped at 72 characters.
+- Few, substantial commits. Fold corrections into the unpushed commit they belong to instead of stacking fixups. One logical change per commit is a ceiling on mixing, not an invitation to fragment.
+- Commit or push only when asked.
 
 ## Writing style
 
-All repository text (code, comments, commits, docs) is functional, minimalistic, and precise. Short sentences. No em dashes. No filler.
-
+All repository text is functional, minimalistic, and precise. Short sentences. No em dashes. No filler. No invented jargon for standard concepts.

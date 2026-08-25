@@ -1,8 +1,5 @@
-# LongContextSpecDecode
+# Long-context speculative decoding
 
-Long-context speculative decoding on sparse attention.
+Self-speculative decoding at long context: the target model drafts against a sparse view of its own KV cache and verifies against the full cache, losslessly. One question drives the work: how fast the drafter can get, and how that beats Vegas.
 
-- Conventions, commands, and environment: [CLAUDE.md](CLAUDE.md)
-- Survey and research direction: [notes/work/survey/README.md](notes/work/survey/README.md)
-- Method design: [notes/work/exit-sparse-self-spec.md](notes/work/exit-sparse-self-spec.md)
-- Code: `src/specdec` (package), `main.py` (CLI). `uv sync`, then `.venv/bin/python main.py --help`.
+This repository holds the knowledge only: [TODO.md](TODO.md) is the working contract (goals, what is done with numbers, what is next) and [literature.yaml](literature.yaml) is the surveyed literature with the settled findings. Code lives in a sibling checkout of the Vegas vLLM fork (`../vegas`, branch `ampere`). Everything that preceded the fork is on branch `survey-and-prototypes`.
