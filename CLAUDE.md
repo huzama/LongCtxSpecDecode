@@ -4,25 +4,25 @@ Guidance for Claude Code in this repository.
 
 ## Project
 
-Long-context self-speculative decoding: sparse-KV drafting by the target model itself, full-KV lossless verification. This repository holds knowledge only: `notes/TODO.md` is the working contract (read it first), `notes/literature.yaml` is the surveyed literature with settled findings. Branch `survey-and-prototypes` archives the survey prose, design docs, HF-era prototypes, and their results; never edit it, only read it.
+Long-context self-speculative decoding: sparse-KV drafting by the target model itself, full-KV lossless verification. This repository is the Vegas vLLM fork (github.com/platformxlab/vegas, vendored at its release; remote `upstream`) plus our notes: `notes/TODO.md` is the working contract (read it first), `notes/literature.yaml` is the surveyed literature with settled findings. Branch `survey-and-prototypes` archives the survey prose, design docs, HF-era prototypes, and their results; never edit it, only read it.
 
-Code lives in the sibling checkout `../vegas` (fork of github.com/platformxlab/vegas, our branch `ampere`). Our additions there: attention overriders under `vllm/v1/spec_decode/sparse_attn/attn_overrider/` (the sm86 path of `vegas.py`, our method next), the reference math `attn_overrider/utils/block_bound.py` with its gate `tests/v1/spec_decode/sparse_attn/test_block_bound.py`, and the benchmarks under `benchmarks/` (`longctx_bench.py`, `run_grid.sh`, `longgen_bench.py`, `benchmark_vegas_a6000.py`).
+Our method goes in as one more attention overrider under `vllm/v1/spec_decode/sparse_attn/attn_overrider/`. Vegas runs on any GPU through the strategy layer there: `score_collection.py` (kernel op or fused Triton recompute, `utils/c2q_scores.py`), `draft_kv.py` (one-token pages or incremental gather, `utils/draft_gather.py`), chosen by `utils/kernel_support.py`; tests under `tests/v1/spec_decode/sparse_attn/`. The reference math `block_bound.py` with its gate and the benchmarks (`longctx_bench.py`, `run_grid.sh`, `longgen_bench.py`, `benchmark_vegas_a6000.py`) still live on branch `ampere` of the old checkout `../vegas` until merged here.
 
 ## Environment
 
 - Only `/shared` is NFS-mounted across servers `srv01`-`srv09`. Both checkouts stay under `/shared`. Paths are user-specific: resolve the repo root with `git rev-parse --show-toplevel`.
-- The fork has its own venv inside it: Python 3.12, vLLM built from source, CUDA 12.8, `TORCH_CUDA_ARCH_LIST=8.6`. Always run `<fork>/.venv/bin/python`; never a system python, never `uv run`. This repository has no venv.
-- The overriders' JIT kernels need `ninja` and `nvcc` on PATH: `export PATH="$PWD/.venv/bin:/usr/local/cuda/bin:$PATH" CUDA_HOME=/usr/local/cuda` from the fork root before any spec-mode run.
-- Cluster GPUs are sm86 (A6000 and similar); no sm90 exists here. vLLM takes its FA2 path, which is why the vegas overrider carries an sm86 branch.
+- This repo's `.venv` (Python 3.12) holds vLLM as an editable install over the prebuilt wheel of the base commit: `VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_LOCATION=https://wheels.vllm.ai/$(git rev-parse f49fd737a^)/vllm-0.16.0-cp38-abi3-manylinux_2_31_x86_64.whl pip install -e .`, no compile. Always run `.venv/bin/python`; never a system python, never `uv run`.
+- Their JIT top-k kernel needs `ninja` and `nvcc` on PATH: `export PATH="$PWD/.venv/bin:/usr/local/cuda/bin:$PATH" CUDA_HOME=/usr/local/cuda` from the repo root before any spec-mode run.
+- Cluster GPUs are sm86 (A6000 and similar); no sm90 exists here. vLLM takes its FA2 path, so the overrider's recompute and gather strategies are the ones exercised.
 - GPU work always runs as a slurm job or job step, never bare on a node. Slurm assigns the GPU; never set `CUDA_VISIBLE_DEVICES`. `ssh` is for CPU-side checks only.
 
 ```bash
-FORK=$(git rev-parse --show-toplevel)/../vegas
+REPO=$(git rev-parse --show-toplevel)
 # Inside an existing reservation (job id from squeue --me):
-srun --jobid=<id> --overlap --chdir=$FORK zsh benchmarks/run_grid.sh outputs/<slug>
+srun --jobid=<id> --overlap --chdir=$REPO zsh benchmarks/run_grid.sh outputs/<slug>
 # New job when GPUs are free (one partition per node, srv0X); several
 # concurrent jobs are fine while GPUs are available:
-srun -p srv0X --gres=gpu:1 --cpus-per-task=8 --mem=64G -t 4:00:00 --chdir=$FORK <cmd>
+srun -p srv0X --gres=gpu:1 --cpus-per-task=8 --mem=64G -t 4:00:00 --chdir=$REPO <cmd>
 # Anything that must outlive the session goes through sbatch.
 ```
 

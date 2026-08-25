@@ -5,7 +5,7 @@ The working contract. Two goals, nothing else gets built.
 1. **Make the drafter faster.** Self-speculative decoding at long context: the drafter is the target model on a sparse KV view, verify is full KV and lossless. Speedup is t/(g*c + 1) with t accepted tokens per round, g draft tokens, c the drafter step cost relative to a dense decode step. t is set by the model and the budget; c is the only free lever.
 2. **Show how it is better than Vegas.** Vegas (arXiv 2602.07223) proved the loop. We build inside their vLLM fork so their method and streamingllm run as in-harness baselines, and beat them on the target axes below.
 
-Code lives in the sibling fork checkout `../vegas`, branch `ampere`. Literature and settled findings live in [literature.yaml](literature.yaml). Everything that preceded the fork (survey prose, design docs, HF-era prototypes and their results) is on branch `survey-and-prototypes`.
+This repository is the Vegas vLLM fork plus these notes. Literature and settled findings live in [literature.yaml](literature.yaml). Everything that preceded the fork (survey prose, design docs, HF-era prototypes and their results) is on branch `survey-and-prototypes`; the reference math and benchmarks wait on branch `ampere` of the old checkout `../vegas`.
 
 ## Done
 
@@ -32,8 +32,8 @@ Code lives in the sibling fork checkout `../vegas`, branch `ampere`. Literature 
 | Plug-in point | `vllm/v1/spec_decode/sparse_attn/attn_overrider/`: one class per method (`vegas`, `streamingllm`, ours next). The streamingllm overrider is the template: block-granular selection, pruned block table, stock FA kernel |
 | Our GPUs | RTX A6000, sm86, 48 GB, FA2 path. No sm90 anywhere on the cluster |
 | Stock vegas on sm86 | Cannot run: the FA2 op silently drops its `scores` argument and rejects its page-size-1 draft tables (both measured) |
-| Our sm86 port of vegas | Emulated score rows (one extra K read per verify) plus a gather draft into page-16 scratch. Acceptance faithful, speed handicapped |
-| Reference math | `attn_overrider/utils/block_bound.py`, gated by `tests/v1/spec_decode/sparse_attn/test_block_bound.py` |
+| Vegas on any GPU | Strategy layer in `attn_overrider/`: `score_collection.py` (kernel op or fused Triton recompute over paged K, no score buffer) and `draft_kv.py` (one-token pages or incremental Triton gather into page-aligned scratch), chosen by `utils/kernel_support.py`; config `sparse_attn_score_source`, `sparse_attn_draft_kv`. Acceptance identical to the kernel path; the recompute costs one extra K read per verify |
+| Reference math | `attn_overrider/utils/block_bound.py` with its gate, on branch `ampere` of the old checkout until merged |
 | Benchmarks | `benchmarks/longctx_bench.py` (one grid cell), `run_grid.sh` (serial driver with GPU drain wait), `longgen_bench.py`, `benchmark_vegas_a6000.py` (their benchmark shape) |
 | Benchmark discipline | Serial cells only: concurrent shards on one node distorted CPU-bound cells by up to 6x. Power-of-two batches: the fork's drafter warmup breaks on odd capture sizes. Prefill-differenced decode, prefix caching off |
 

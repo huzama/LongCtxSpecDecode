@@ -172,6 +172,17 @@ class SpeculativeConfig:
     """The minimum number of tokens to attend to in sparse attention. Only used
     when sparse_attn_algorithm is specified. Defaults to 256."""
 
+    sparse_attn_score_source: Literal["auto", "kernel", "recompute"] = "auto"
+    """Where the verification-guided scores come from: the attention kernel
+    (needs the vegas flash-attention fork's FA3 op) or a fused recomputation
+    over the paged K cache that works with any kernel. "auto" uses the kernel
+    when the loaded op supports it."""
+
+    sparse_attn_draft_kv: Literal["auto", "token_pages", "gather"] = "auto"
+    """How the draft pass addresses the selected tokens: one-token pages (FA3
+    only) or a gather into page-aligned scratch that works with any paged
+    kernel. "auto" uses token pages when the kernel accepts them."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
