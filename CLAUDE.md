@@ -4,7 +4,7 @@ Guidance for Claude Code in this repository.
 
 ## Project
 
-Long-context self-speculative decoding: sparse-KV drafting by the target model itself, full-KV lossless verification. This repository holds knowledge only: `TODO.md` is the working contract (read it first), `literature.yaml` is the surveyed literature with settled findings. Branch `survey-and-prototypes` archives the survey prose, design docs, HF-era prototypes, and their results; never edit it, only read it.
+Long-context self-speculative decoding: sparse-KV drafting by the target model itself, full-KV lossless verification. This repository holds knowledge only: `notes/TODO.md` is the working contract (read it first), `notes/literature.yaml` is the surveyed literature with settled findings. Branch `survey-and-prototypes` archives the survey prose, design docs, HF-era prototypes, and their results; never edit it, only read it.
 
 Code lives in the sibling checkout `../vegas` (fork of github.com/platformxlab/vegas, our branch `ampere`). Our additions there: attention overriders under `vllm/v1/spec_decode/sparse_attn/attn_overrider/` (the sm86 path of `vegas.py`, our method next), the reference math `attn_overrider/utils/block_bound.py` with its gate `tests/v1/spec_decode/sparse_attn/test_block_bound.py`, and the benchmarks under `benchmarks/` (`longctx_bench.py`, `run_grid.sh`, `longgen_bench.py`, `benchmark_vegas_a6000.py`).
 
@@ -37,7 +37,7 @@ srun -p srv0X --gres=gpu:1 --cpus-per-task=8 --mem=64G -t 4:00:00 --chdir=$FORK 
 ## Conventions
 
 - Timeless naming everywhere: files, symbols, and headings by topic, never by date or version. Run outputs are the one exception and carry a slug plus timestamp; never reference a timestamped path from committed text.
-- `TODO.md` keeps its shape: goals first, then done (decisions and measurements with qualifiers), then next. `literature.yaml` is hand-maintained; append findings, never renumber IDs.
+- `notes/TODO.md` keeps its shape: goals first, then done (decisions and measurements with qualifiers), then next. `notes/literature.yaml` is hand-maintained; append findings, never renumber IDs.
 - Notes and messages: TL;DR first, decisions before evidence, tables for enumerable content, prose only for argument. Short sentences. No em dashes. No filler.
 
 ## Git
