@@ -566,6 +566,8 @@ class SparseAttnProposer:
         self.input_ids = self.runner.input_ids.gpu
         self.positions = self.runner.positions.gpu
 
+        self.attn_overrider.bind_model(self.model)
+
     @torch.inference_mode()
     @_method_wrapper(enter_fn=_enter_propose, exit_fn=_exit_propose)
     def dummy_run(

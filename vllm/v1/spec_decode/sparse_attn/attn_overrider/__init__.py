@@ -71,6 +71,10 @@ class BaseAttnOverrider(ABC):
         self.in_propose = False
         assert self.curr_layer == 0
 
+    def bind_model(self, model) -> None:
+        """Called once the target model is loaded; overriders that hook the
+        model itself override this."""
+
     def _attention(self, *args, **kwargs):
         if self.in_propose:
             rtv = self._draft_attention(*args, **kwargs)
@@ -102,6 +106,11 @@ def build_attention_overrider(
     elif method == "vegas":
         from .vegas import VegasAttnOverrider
         cls = VegasAttnOverrider
+    elif method == "coverage":
+        from vllm.v1.spec_decode.sparse_attn.longspec import (
+            CoverageAttnOverrider,
+        )
+        cls = CoverageAttnOverrider
     else:
         raise ValueError(f"Unknown sparse_attn_algorithm: {method}")
 
