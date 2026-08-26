@@ -7,7 +7,7 @@ weight mode, averaged per varlen_reduce's entry rules, in fp32, cast to bf16.
 import pytest
 import torch
 
-from vllm.v1.spec_decode.sparse_attn.attn_overrider.utils.c2q_scores import (
+from vllm.v1.spec_decode.sparse_attn.longspec.kernels.c2q_scores import (
     c2q_metric,
 )
 

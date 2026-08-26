@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Capability detection must answer without a GPU and never raise."""
-from vllm.v1.spec_decode.sparse_attn.attn_overrider.utils import kernel_support
+from vllm.v1.spec_decode.sparse_attn.longspec.portable import kernel_support
 
 
 def test_detection_is_total():

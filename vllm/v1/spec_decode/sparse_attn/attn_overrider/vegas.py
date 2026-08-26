@@ -8,10 +8,10 @@ import triton.language as tl
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.spec_decode.sparse_attn.attn_overrider import BaseAttnOverrider
-from vllm.v1.spec_decode.sparse_attn.attn_overrider.draft_kv import (
+from vllm.v1.spec_decode.sparse_attn.longspec.portable.draft_kv import (
     build_draft_kv,
 )
-from vllm.v1.spec_decode.sparse_attn.attn_overrider.score_collection import (
+from vllm.v1.spec_decode.sparse_attn.longspec.portable.score_collection import (
     build_score_collector,
 )
 from vllm.v1.spec_decode.sparse_attn.attn_overrider.utils import (
@@ -19,7 +19,7 @@ from vllm.v1.spec_decode.sparse_attn.attn_overrider.utils import (
     calc_topk_workspace_size,
     autotune_path,
 )
-from vllm.v1.spec_decode.sparse_attn.attn_overrider.utils.kernel_support import (
+from vllm.v1.spec_decode.sparse_attn.longspec.portable.kernel_support import (
     flash_attn_version,
 )
 
@@ -124,7 +124,7 @@ class VegasAttnOverrider(BaseAttnOverrider):
         self._topk_width = self.max_tokens + 2 * self.num_spec_tokens + 1
 
         # Strategies for the two kernel features the method relies on, chosen
-        # against the binary actually loaded (see utils/kernel_support.py).
+        # against the binary actually loaded (see longspec/portable/kernel_support.py).
         speculative_config = vllm_config.speculative_config
         fa_version = flash_attn_version()
         self._scores = build_score_collector(

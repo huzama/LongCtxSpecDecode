@@ -12,11 +12,11 @@ Stock vegas is Hopper-only twice: its scores come from a patched FlashAttention-
 
 | Feature | Patched FA3 | Portable | Code |
 |---|---|---|---|
-| Scores of two query rows per request | written by the kernel | one fused Triton pass over paged K writes the reduced metric directly; no score buffer; one extra K read per verify | `score_collection.py`, `utils/c2q_scores.py` |
-| Draft over the selected tokens | page-size-1 table | selection gathered into page-aligned scratch once per propose, one-token append per step | `draft_kv.py`, `utils/draft_gather.py` |
-| Choice | `auto` by detection; a forced unavailable path fails at init | | `utils/kernel_support.py`; config `sparse_attn_score_source`, `sparse_attn_draft_kv` |
+| Scores of two query rows per request | written by the kernel | one fused Triton pass over paged K writes the reduced metric directly; no score buffer; one extra K read per verify | `longspec/portable/score_collection.py`, `longspec/kernels/c2q_scores.py` |
+| Draft over the selected tokens | page-size-1 table | selection gathered into page-aligned scratch once per propose, one-token append per step | `longspec/portable/draft_kv.py`, `longspec/kernels/draft_gather.py` |
+| Choice | `auto` by detection; a forced unavailable path fails at init | | `longspec/portable/kernel_support.py`; config `sparse_attn_score_source`, `sparse_attn_draft_kv` |
 
-Tests: `tests/v1/spec_decode/sparse_attn/`.
+Tests: `tests/v1/spec_decode/sparse_attn/longspec/`.
 
 ## Measured
 

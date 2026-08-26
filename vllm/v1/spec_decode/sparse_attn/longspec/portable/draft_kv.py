@@ -10,8 +10,8 @@ kernel by copying the selection into page-aligned scratch.
 
 import torch
 
-from .utils.draft_gather import gather_tokens
-from .utils.kernel_support import supports_token_pages
+from ..kernels.draft_gather import gather_tokens
+from .kernel_support import supports_token_pages
 
 
 class TokenPagedDraftKV:

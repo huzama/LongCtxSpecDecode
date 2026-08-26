@@ -128,13 +128,13 @@ implemented in our companion
 
 The reference build collects the verification scores inside a patched FA3
 kernel and drafts over one-token pages, both sm90-only. On other GPUs the
-overrider selects portable strategies automatically (`utils/kernel_support.py`
+overrider selects portable strategies automatically (`longspec/portable/kernel_support.py`
 inspects the loaded kernel):
 
 | Feature | With the patched FA3 op | Otherwise |
 | --- | --- | --- |
-| Score collection | kernel writes the two query rows' scores | `utils/c2q_scores.py`: one fused Triton pass over the paged K cache, writing the reduced metric directly; no score buffer |
-| Draft over selected tokens | page-size-1 table | `utils/draft_gather.py`: selection gathered into page-aligned scratch once per propose, one-token append per step |
+| Score collection | kernel writes the two query rows' scores | `longspec/kernels/c2q_scores.py`: one fused Triton pass over the paged K cache, writing the reduced metric directly; no score buffer |
+| Draft over selected tokens | page-size-1 table | `longspec/kernels/draft_gather.py`: selection gathered into page-aligned scratch once per propose, one-token append per step |
 
 Both can be forced through `speculative_config`: `sparse_attn_score_source`
 (`auto`, `kernel`, `recompute`) and `sparse_attn_draft_kv` (`auto`,
@@ -142,7 +142,7 @@ Both can be forced through `speculative_config`: `sparse_attn_score_source`
 acceptance matches the kernel path. The recompute costs one extra read of K per
 verify pass. Their JIT top-k kernel needs `ninja` and `nvcc` on `PATH`.
 
-Tests: `pytest tests/v1/spec_decode/sparse_attn/` (the kernel tests need a GPU).
+Tests: `pytest tests/v1/spec_decode/sparse_attn/longspec/` (the kernel tests need a GPU).
 
 ## Citation
 

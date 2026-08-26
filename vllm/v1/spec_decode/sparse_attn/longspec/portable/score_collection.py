@@ -10,9 +10,11 @@ kernel and works with any paged attention backend.
 
 import torch
 
-from .utils import varlen_reduce
-from .utils.c2q_scores import c2q_metric
-from .utils.kernel_support import kernel_collects_scores
+from vllm.v1.spec_decode.sparse_attn.attn_overrider.utils import (
+    varlen_reduce,
+)
+from ..kernels.c2q_scores import c2q_metric
+from .kernel_support import kernel_collects_scores
 
 
 class KernelScoreCollector:

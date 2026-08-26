@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from vllm.v1.spec_decode.sparse_attn.attn_overrider.utils.draft_gather import (
+from vllm.v1.spec_decode.sparse_attn.longspec.kernels.draft_gather import (
     gather_tokens,
 )
 
