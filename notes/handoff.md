@@ -22,16 +22,21 @@ Tests: `tests/v1/spec_decode/sparse_attn/longspec/`.
 
 The method of [method.md](method.md), as `CoverageAttnOverrider` in `longspec/`: per-layer, per-request budgets from a coverage target, sink and recency reserved, one fused CUDA selection per round over all layers, static attention and whole-layer skip masks, per-layer budget statistics. Config: `sparse_attn_algorithm="coverage"` plus `sparse_attn_coverage`, `sparse_attn_sink`, `sparse_attn_recent`, `sparse_attn_skip_attn_layers`, `sparse_attn_skip_layers`. Grid runner: `benchmarks/longspec/grid.py`.
 
-First cell, 32K batch 1, defaults (θ 0.9, S 4, R 64, cap 0.07, min 0), same setup as the baseline grid, one pass:
+Grid, one pass: Qwen3-4B, one A6000, pg19, greedy, 256 tokens, serial cells, g = 6. Vegas at 7%; coverage with sink 4, recent 64, min 0, cap 15%. 64K and 128K use YaRN (factor 2 and 4 on the 40960 window), 32K none. Decode tok/s; ratio against dense at the same cell; KV read is the mean over layers of the selected fraction of the scored prefix.
 
-| mode | decode tok/s | alpha | tau (of 7) | KV read per draft step |
-|---|---|---|---|---|
-| dense | 48.8 | | | |
-| vegas | 44.2 | 0.877 | 6.22 | 7.2% of prefix |
-| coverage | 41.8 | 0.822 | 5.93 | 4.0% mean over layers |
+| ctx | batch | dense | vegas 7% | coverage θ 0.90 | coverage θ 0.95 | coverage θ 0.98 |
+|---|---|---|---|---|---|---|
+| 32K | 1 | 49.0 | 45.6 (0.93x), tau 6.38 | 36.6 (0.75x), tau 5.80, 5.5% | 46.6 (0.95x), tau 6.61, 11% | 46.6 (0.95x), tau 6.71, 15% |
+| 32K | 4 | 92.5 | 103.8 (1.12x), tau 6.14 | **111.9 (1.21x)**, tau 5.96, 4.7% | 111.1 (1.20x), tau 6.10, 10% | 112.9 (1.22x), tau 6.51, 14% |
+| 64K | 1 | 35.8 | 22.2 (0.62x), tau 5.52 | 26.5 (0.74x), tau 5.23, 5.2% | 27.7 (0.77x), tau 5.64, 11% | 28.9 (0.81x), tau 6.05, 15% |
+| 64K | 2 | 46.3 | 50.9 (1.10x), tau 5.38 | 48.4 (1.05x), tau 5.11, 5.0% | 51.2 (1.11x), tau 5.44, 11% | 50.2 (1.08x), tau 5.88, 14% |
+| 128K | 1 | 23.9 | 19.4 (0.81x), tau 5.43 | 19.6 (0.82x), tau 5.31, 3.9% | 21.8 (0.91x), tau 5.84, 8.6% | 22.1 (0.92x), tau 6.12, 13% |
 
-- Layers 0-3 sit at the 7% cap at θ 0.9; layers 5, 11, 25, 30-32 use under 2%. The profile T2 asked for exists; the θ sweep and matched-bytes comparison are the next grid.
-- At batch 1 fewer KV bytes buy nothing, as the drafter cost analysis predicted; acceptance decides, and 0.9 coverage is below vegas's flat 7%.
+- Acceptance: θ 0.95 beats vegas's tau at every cell with about 1.5x its bytes; θ 0.90 trails it by 0.1-0.6 with 55-80% of its bytes; θ 0.98 sits at the cap almost everywhere, so it is a flat 15% budget in effect.
+- Speed: coverage wins where bytes matter and acceptance is close (32K batch 4: 1.21x vs 1.12x at 4.7% of the KV; 128K batch 1: equal to vegas at 55% of its bytes). At batch 1 the bytes are free and only acceptance counts, so higher θ is simply faster.
+- Per-layer profile at θ 0.90: layers 1-3 sit at the cap, layers 5, 7, 11, 23, 25, 30 read under 2%. The profile is stable across context and batch.
+- Vegas acceptance at 64K and 128K is far below the baseline pass (tau 5.4-5.5 vs 6.3-6.95) while the 32K cells match; the YaRN configuration of that pass is not recorded. Generations are coherent book continuations at every length. Dense speeds reproduce (within 2% at 32K and 64K, 128K 13% faster).
+- Node shared with another user's GPU job from the 32K batch-4 vegas cell onward (load average under 2). Dense cells were unaffected; spec cells at batch 1 may read low by up to ~10%. A quiet-node rerun of the 32K batch-1 row is pending.
 
 Found on the way, fixed in our port: rows padded for a CUDA graph were scored with a block table of -1 (a read outside the cache); the draft's gathered scratch was allocated after vLLM's memory profiling. Found, not fixed: the draft step runs with no CUDA graphs at all (the drafter holds the model loaded before the graph wrapper), which is part of the measured c ≈ 0.8.
 
