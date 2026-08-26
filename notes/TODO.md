@@ -24,10 +24,11 @@ Pointers: [handoff.md](handoff.md) for what exists and what is measured, [litera
 - [x] Harness: the fork vendored, installed over the prebuilt wheel, no compile.
 - [x] Vegas on any GPU: score recompute and draft gather strategies, tests, config knobs.
 - [x] Baseline grid: dense and vegas at 32K-128K, batch 1 to saturation, on a quiet node; vegas acceptance reproduces its paper. Numbers in handoff.md.
+- [x] Method: coverage-budgeted drafting designed and implemented as `longspec`, unit tests and parity test green. Design and status in method.md.
 
 ## To do
 
-- [ ] 1. Design the method. Maintainer.
+- [ ] 1. Grid for the method: T2-T5 of method.md on the serial grid. Needs the pg19 prompts fetched once on a node with network.
 - [ ] 2. Profile the draft step inside `propose()`: attention, weights, sampler, metadata rebuild; 64K batch 1 and 32K batch 4. Tells where c goes.
 - [ ] 3. Parity gate: full budget reproduces dense output. Before any speed claim.
 - [ ] 4. Head-to-head vs vegas at matched ratio on the same serial grid: acceptance and tok/s.

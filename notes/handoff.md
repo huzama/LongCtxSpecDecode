@@ -18,6 +18,23 @@ Stock vegas is Hopper-only twice: its scores come from a patched FlashAttention-
 
 Tests: `tests/v1/spec_decode/sparse_attn/longspec/`.
 
+## Built: coverage drafter
+
+The method of [method.md](method.md), as `CoverageAttnOverrider` in `longspec/`: per-layer, per-request budgets from a coverage target, sink and recency reserved, one fused CUDA selection per round over all layers, static attention and whole-layer skip masks, per-layer budget statistics. Config: `sparse_attn_algorithm="coverage"` plus `sparse_attn_coverage`, `sparse_attn_sink`, `sparse_attn_recent`, `sparse_attn_skip_attn_layers`, `sparse_attn_skip_layers`. Grid runner: `benchmarks/longspec/grid.py`.
+
+First cell, 32K batch 1, defaults (θ 0.9, S 4, R 64, cap 0.07, min 0), same setup as the baseline grid, one pass:
+
+| mode | decode tok/s | alpha | tau (of 7) | KV read per draft step |
+|---|---|---|---|---|
+| dense | 48.8 | | | |
+| vegas | 44.2 | 0.877 | 6.22 | 7.2% of prefix |
+| coverage | 41.8 | 0.822 | 5.93 | 4.0% mean over layers |
+
+- Layers 0-3 sit at the 7% cap at θ 0.9; layers 5, 11, 25, 30-32 use under 2%. The profile T2 asked for exists; the θ sweep and matched-bytes comparison are the next grid.
+- At batch 1 fewer KV bytes buy nothing, as the drafter cost analysis predicted; acceptance decides, and 0.9 coverage is below vegas's flat 7%.
+
+Found on the way, fixed in our port: rows padded for a CUDA graph were scored with a block table of -1 (a read outside the cache); the draft's gathered scratch was allocated after vLLM's memory profiling. Found, not fixed: the draft step runs with no CUDA graphs at all (the drafter holds the model loaded before the graph wrapper), which is part of the measured c ≈ 0.8.
+
 ## Measured
 
 Qwen3-4B, one A6000 (sm86, FA2), pg19, greedy, 256 tokens, serial cells on a quiet node; decode tok/s with prefill separated, ratio against dense at the same cell. The vegas column reproduced within 2% across two passes.
