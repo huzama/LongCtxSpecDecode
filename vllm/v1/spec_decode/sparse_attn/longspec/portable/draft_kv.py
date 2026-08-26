@@ -42,31 +42,28 @@ class GatheredDraftKV:
     """
 
     def __init__(self, num_layers: int, max_batch_size: int, width: int,
-                 page: int, device: torch.device):
+                 page: int, device: torch.device, kv_heads: int, head_dim: int,
+                 dtype: torch.dtype):
         self._num_layers = num_layers
         self._max_batch_size = max_batch_size
         self._page = page
         self._pages = (width + page - 1) // page
         self._device = device
-        self._k = None
-        self._v = None
-        self._block_table = None
         self._fresh = [False] * num_layers
         self._starts = torch.zeros(max_batch_size, device=device,
                                    dtype=torch.int32)
         self._zeros = torch.zeros(max_batch_size, device=device,
                                   dtype=torch.int32)
-
-    def _allocate(self, like: torch.Tensor) -> None:
-        kv_heads, dim = like.shape[-2], like.shape[-1]
-        shape = (self._num_layers, self._max_batch_size,
-                 self._pages * self._page, kv_heads, dim)
-        self._k = torch.zeros(*shape, dtype=like.dtype, device=like.device)
+        # Allocated at construction so vLLM's memory profiling sees it; the
+        # scratch is the largest allocation the draft owns.
+        shape = (num_layers, max_batch_size, self._pages * page, kv_heads,
+                 head_dim)
+        self._k = torch.zeros(*shape, dtype=dtype, device=device)
         self._v = torch.zeros_like(self._k)
         self._block_table = torch.arange(
-            self._num_layers * self._max_batch_size * self._pages,
-            device=like.device, dtype=torch.int32,
-        ).view(self._num_layers, self._max_batch_size, self._pages)
+            num_layers * max_batch_size * self._pages,
+            device=device, dtype=torch.int32,
+        ).view(num_layers, max_batch_size, self._pages)
 
     def begin_propose(self) -> None:
         self._fresh = [False] * self._num_layers
@@ -74,8 +71,6 @@ class GatheredDraftKV:
     def attention_kwargs(self, kwargs: dict, layer: int, slots: torch.Tensor,
                          used: torch.Tensor) -> None:
         k, v = kwargs["k"], kwargs["v"]
-        if self._k is None:
-            self._allocate(k)
         batch = slots.shape[0]
         if self._fresh[layer]:
             torch.sub(used, 1, out=self._starts[:batch]).clamp_(min=0)
@@ -95,12 +90,13 @@ class GatheredDraftKV:
                                          self._pages * self._page)
 
     def scratch_bytes(self) -> int:
-        return 0 if self._k is None else 2 * self._k.nbytes
+        return 2 * self._k.nbytes
 
 
 def build_draft_kv(mode: str, fa_version: int, num_layers: int,
                    max_batch_size: int, width: int, page: int,
-                   device: torch.device):
+                   device: torch.device, kv_heads: int, head_dim: int,
+                   dtype: torch.dtype):
     """Resolve the configured mode against what the loaded kernel accepts."""
     available = supports_token_pages(fa_version)
     if mode == "token_pages" and not available:
@@ -109,5 +105,6 @@ def build_draft_kv(mode: str, fa_version: int, num_layers: int,
             f"page size 1 (FA3); the loaded kernel is FA{fa_version}. Use "
             "'gather' or 'auto'.")
     if mode == "gather" or (mode == "auto" and not available):
-        return GatheredDraftKV(num_layers, max_batch_size, width, page, device)
+        return GatheredDraftKV(num_layers, max_batch_size, width, page, device,
+                               kv_heads, head_dim, dtype)
     return TokenPagedDraftKV()

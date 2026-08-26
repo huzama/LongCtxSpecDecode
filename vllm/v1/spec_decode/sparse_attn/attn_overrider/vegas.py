@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Vegas: https://arxiv.org/abs/2602.07223
 import torch
-import triton
-import triton.language as tl
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -19,71 +17,14 @@ from vllm.v1.spec_decode.sparse_attn.attn_overrider.utils import (
     calc_topk_workspace_size,
     autotune_path,
 )
+from vllm.v1.spec_decode.sparse_attn.longspec.kernels.slot_table import (
+    index_to_slots,
+)
 from vllm.v1.spec_decode.sparse_attn.longspec.portable.kernel_support import (
     flash_attn_version,
 )
 
 logger = init_logger(__name__)
-
-
-@triton.jit
-def _index_to_slot_kernel(
-    indices_ptr,
-    page_table_ptr,
-    budget_ptr,
-    valid_lens_ptr,
-    seqlens_ptr,
-    stride_indices_layer,
-    stride_indices_row,
-    stride_page_table_row,
-    page_size,
-    BLOCK_SIZE: tl.constexpr,
-):
-    layer_idx = tl.program_id(0)
-    batch_idx = tl.program_id(1)
-
-    budget = tl.load(budget_ptr + batch_idx)
-    valid_len = tl.load(valid_lens_ptr + batch_idx)
-    seqlen = tl.load(seqlens_ptr + batch_idx)
-    num_recent = seqlen - valid_len
-
-    row_ptr = (indices_ptr +
-               layer_idx * stride_indices_layer +
-               batch_idx * stride_indices_row)
-    pt_row_ptr = page_table_ptr + batch_idx * stride_page_table_row
-
-    # Part 1: convert top-k indices [0, budget) in-place.
-    for start in tl.range(0, budget, BLOCK_SIZE):
-        offsets = start + tl.arange(0, BLOCK_SIZE)
-        mask = offsets < budget
-
-        index = tl.load(row_ptr + offsets, mask=mask)
-
-        logical_page = index // page_size
-        offset_in_page = index % page_size
-        physical_page = tl.load(
-            pt_row_ptr + logical_page, mask=mask
-        )
-        slot = physical_page * page_size + offset_in_page
-
-        tl.store(row_ptr + offsets, slot, mask=mask)
-
-    # Part 2: generate recent-token indices [valid_len, seqlen),
-    #         convert to slots, store at [budget, budget + num_recent).
-    for start in tl.range(0, num_recent, BLOCK_SIZE):
-        offsets = start + tl.arange(0, BLOCK_SIZE)
-        mask = offsets < num_recent
-
-        index = valid_len + offsets
-
-        logical_page = index // page_size
-        offset_in_page = index % page_size
-        physical_page = tl.load(
-            pt_row_ptr + logical_page, mask=mask
-        )
-        slot = physical_page * page_size + offset_in_page
-
-        tl.store(row_ptr + budget + offsets, slot, mask=mask)
 
 
 class VegasAttnOverrider(BaseAttnOverrider):
@@ -132,10 +73,13 @@ class VegasAttnOverrider(BaseAttnOverrider):
             self.max_batch_size, self.num_query_heads, self.max_model_len,
             self.device,
         )
+        model_config = vllm_config.model_config
         self._draft_kv = build_draft_kv(
             speculative_config.sparse_attn_draft_kv, fa_version,
             self.num_layers, self.max_batch_size, self._topk_width,
             self.block_size, self.device,
+            model_config.get_num_kv_heads(parallel_config),
+            model_config.get_head_size(), model_config.dtype,
         )
         logger.info(
             "Vegas on FA%d: scores via %s, draft KV via %s", fa_version,
@@ -193,20 +137,15 @@ class VegasAttnOverrider(BaseAttnOverrider):
         seqlens_k: torch.Tensor = kwargs["seqused_k"]
         block_table: torch.Tensor = kwargs["block_table"]
 
-        THREAD_BLOCK_SIZE = 256
-        _index_to_slot_kernel[(self.num_layers, self.batch_size)](
-            self._page_table,
+        # We should be inside the first drafting step, and we need to
+        # prepare the page table for all drafting steps.
+        index_to_slots(
+            self._page_table[:, :self.batch_size],
             block_table,
             self._topk_budget,
             self._topk_valid_lens,
-            # We should be inside the first drafting step,
-            # and we need to prepare the page table for all drafting steps.
             seqlens_k - 1 + self.num_spec_tokens,
-            self._page_table.stride(0),
-            self._page_table.stride(1),
-            block_table.stride(0),
             self.block_size,
-            BLOCK_SIZE=THREAD_BLOCK_SIZE,
         )
 
         # Repurpose topk_budget to store the number of total valid slots
@@ -269,6 +208,10 @@ class VegasAttnOverrider(BaseAttnOverrider):
             # In prefill: [0, seqlens_k)
             self._topk_valid_lens[:self.batch_size] = seqlens_k + 1 - \
                 seqlens_q.masked_fill(in_prefill, 1)
+            # Rows padded for a CUDA graph have no query and a block table
+            # of -1; scoring them would read outside the cache.
+            self._topk_valid_lens[:self.batch_size].masked_fill_(
+                seqlens_q == 0, 0)
 
             # Calculate per-request budget.
             self._topk_budget[:self.batch_size] = \
