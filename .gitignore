@@ -238,3 +238,6 @@ ep_kernels_workspace/
 vllm/grpc/vllm_engine_pb2.py
 vllm/grpc/vllm_engine_pb2_grpc.py
 vllm/grpc/vllm_engine_pb2.pyi
+
+# Benchmark run outputs (slug plus timestamp)
+outputs/
