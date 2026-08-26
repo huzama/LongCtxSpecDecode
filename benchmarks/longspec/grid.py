@@ -211,10 +211,22 @@ def build_engine(args):
         speculative_config=speculative_config(args),
     )
     if factor is not None:
-        kwargs["hf_overrides"] = {"rope_scaling": {
-            "rope_type": "yarn", "factor": factor,
-            "original_max_position_embeddings": NATIVE_WINDOW}}
+        kwargs["hf_overrides"] = {"rope_parameters": yarn_parameters(
+            args.model, factor)}
     return LLM(**kwargs), factor
+
+
+def yarn_parameters(model: str, factor: float) -> dict:
+    """vLLM derives the context limit from ``rope_parameters``; the legacy
+    ``rope_scaling`` key is converted before overrides apply and is ignored."""
+    from transformers import AutoConfig
+    config = AutoConfig.from_pretrained(model)
+    theta = getattr(config, "rope_theta", None)
+    if theta is None:
+        theta = (getattr(config, "rope_parameters", None) or {})["rope_theta"]
+    return {"rope_type": "yarn", "factor": factor,
+            "original_max_position_embeddings": NATIVE_WINDOW,
+            "rope_theta": float(theta)}
 
 
 # ---------------------------------------------------------------------------
