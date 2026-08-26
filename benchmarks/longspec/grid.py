@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Long-context decode grid: dense, vegas, coverage on pg19 prompts.
+"""Long-context decode grid: dense, vegas, coverage, longspec on pg19 prompts.
+
+coverage is attention-mass selection alone; longspec adds the skip masks.
 
 One cell = one context length, one batch size, one mode, one fresh engine in
 its own process. Decode throughput is the difference between a gen=1 and a
 gen=N run at identical prefill; acceptance comes from vLLM's spec-decode
-counters; per-layer budgets from the coverage overrider. Every cell appends
+counters; per-layer budgets from the longspec overrider. Every cell appends
 one JSON line to <run dir>/results.jsonl and saves its output token ids, so
 a `--parity` run can compare spec modes with dense token for token.
 
@@ -13,9 +15,9 @@ between cells, power-of-two batches, prefix caching off, greedy, ignore_eos.
 Spec modes need nvcc and ninja on PATH (the fork's JIT top-k kernel).
 
 Examples (inside a slurm allocation on the node holding the venv):
-  python benchmarks/longspec/grid.py --ctx 32768 --batch 1 --mode coverage
-  python benchmarks/longspec/grid.py --cells 32768:1:dense,32768:1:vegas,32768:1:coverage
-  python benchmarks/longspec/grid.py --cells 4096:1:dense,4096:1:coverage --parity --theta 1 --ratio 1
+  python benchmarks/longspec/grid.py --ctx 32768 --batch 1 --mode longspec
+  python benchmarks/longspec/grid.py --cells 32768:1:dense,32768:1:vegas,32768:1:longspec
+  python benchmarks/longspec/grid.py --cells 4096:1:dense,4096:1:longspec --parity --theta 1 --ratio 1
 """
 
 import argparse
@@ -32,7 +34,7 @@ from pathlib import Path
 
 MODEL = "Qwen/Qwen3-4B"
 NATIVE_WINDOW = 40960  # Qwen3 max_position_embeddings; beyond it, YaRN
-SPEC_MODES = ("vegas", "coverage")
+SPEC_MODES = ("vegas", "coverage", "longspec")
 
 
 # ---------------------------------------------------------------------------
@@ -51,12 +53,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--gen", type=int, default=256, help="generated tokens")
     p.add_argument("--spec-tokens", type=int, default=6)
     p.add_argument("--ratio", type=float, default=0.07,
-                   help="vegas budget ratio; coverage cap")
+                   help="vegas budget ratio; longspec cap")
     p.add_argument("--theta", type=float, default=0.9)
     p.add_argument("--sink", type=int, default=4)
     p.add_argument("--recent", type=int, default=64)
     p.add_argument("--min-tokens", type=int, default=None,
-                   help="default: 256 for vegas, 0 for coverage")
+                   help="default: 256 for vegas, 0 for longspec")
     p.add_argument("--skip-attn-layers", default="",
                    help="comma list of layers whose attention the draft skips")
     p.add_argument("--skip-layers", default="",
@@ -176,7 +178,7 @@ def speculative_config(args) -> dict | None:
         return None
     min_tokens = args.min_tokens
     if min_tokens is None:
-        min_tokens = 0 if args.mode == "coverage" else 256
+        min_tokens = 256 if args.mode == "vegas" else 0
     cfg = {
         "method": "sparse_attn",
         "num_speculative_tokens": args.spec_tokens,
@@ -184,9 +186,9 @@ def speculative_config(args) -> dict | None:
         "sparse_attn_ratio": args.ratio,
         "sparse_attn_min_tokens": min_tokens,
     }
-    if args.mode == "coverage":
+    if args.mode in ("coverage", "longspec"):
         cfg.update({
-            "sparse_attn_coverage": args.theta,
+            "sparse_attn_theta": args.theta,
             "sparse_attn_sink": args.sink,
             "sparse_attn_recent": args.recent,
             "sparse_attn_skip_attn_layers": _int_list(args.skip_attn_layers),
@@ -300,12 +302,13 @@ def run_cell(args, run_dir: Path) -> dict:
 
     generate(llm, prompts, 1)  # warmup: graphs, JIT kernels, allocator
     t_1, _ = generate(llm, prompts, 1)
-    if args.mode == "coverage":
+    if args.mode in ("coverage", "longspec"):
         llm.collective_rpc(_overrider_reset)
     before = spec_counters(llm, args.spec_tokens) if spec else None
     t_gen, tokens = generate(llm, prompts, args.gen)
     counters = _diff(spec_counters(llm, args.spec_tokens), before) if spec else None
-    budget = llm.collective_rpc(_overrider_stats)[0] if args.mode == "coverage" else None
+    budget = (llm.collective_rpc(_overrider_stats)[0]
+              if args.mode in ("coverage", "longspec") else None)
 
     decode_tok_s = args.batch * (args.gen - 1) / (t_gen - t_1)
     record = {

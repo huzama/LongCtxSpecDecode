@@ -161,39 +161,43 @@ class SpeculativeConfig:
     or equal to this value."""
 
     # Self-speculative decoding with sparse attention
-    sparse_attn_algorithm: Literal["streamingllm", "vegas", "coverage"] = (
-        "streamingllm"
-    )
-    """The KV sparsity pattern used by self-speculative decoding."""
+    sparse_attn_algorithm: Literal[
+        "streamingllm", "vegas", "coverage", "longspec"
+    ] = "streamingllm"
+    """The KV sparsity pattern used by self-speculative decoding. "coverage"
+    is attention-mass selection alone; "longspec" is the full method, the
+    same selection plus the layer skip masks."""
 
     sparse_attn_ratio: float = Field(default=0.05, gt=0, le=1)
     """The ratio of tokens to attend to in sparse attention. Only used when
-    sparse_attn_algorithm is specified. Defaults to 0.05. For "coverage" it
-    caps the per-layer budget; 1 means uncapped."""
+    sparse_attn_algorithm is specified. Defaults to 0.05. For "coverage" and
+    "longspec" it caps the per-layer budget; 1 means uncapped."""
 
     sparse_attn_min_tokens: int = Field(default=256, ge=0)
     """The minimum number of tokens to attend to in sparse attention. Only used
     when sparse_attn_algorithm is specified. Defaults to 256."""
 
-    sparse_attn_coverage: float = Field(default=0.9, gt=0, le=1)
-    """Coverage target of the "coverage" algorithm: per layer and request, the
-    draft attends the smallest top-p set whose attention mass, together with
-    the reserved sink and recent tokens, reaches this fraction."""
+    sparse_attn_theta: float = Field(default=0.9, gt=0, le=1)
+    """Attention-mass target of "coverage" and "longspec": per layer and
+    request, the draft attends the smallest top-p set whose attention mass,
+    together with the reserved sink and recent tokens, reaches this
+    fraction."""
 
     sparse_attn_sink: int = Field(default=4, ge=0)
-    """Number of leading tokens the "coverage" draft always attends."""
+    """Number of leading tokens the "coverage" and "longspec" drafts always
+    attend."""
 
     sparse_attn_recent: int = Field(default=64, ge=0)
-    """Number of most recent scored tokens the "coverage" draft always
-    attends."""
+    """Number of most recent scored tokens the "coverage" and "longspec"
+    drafts always attend."""
 
     sparse_attn_skip_attn_layers: list[int] = Field(default_factory=list)
-    """Layers whose attention sublayer the "coverage" draft skips (attention
-    output zero, residual passes through). Ablation knob."""
+    """Layers whose attention sublayer the "longspec" draft skips (attention
+    output zero, residual passes through). Not allowed with "coverage"."""
 
     sparse_attn_skip_layers: list[int] = Field(default_factory=list)
-    """Layers the "coverage" draft bypasses entirely. Requires enforce_eager.
-    Ablation knob."""
+    """Layers the "longspec" draft bypasses entirely. Requires enforce_eager.
+    Not allowed with "coverage"."""
 
     sparse_attn_score_source: Literal["auto", "kernel", "recompute"] = "auto"
     """Where the verification-guided scores come from: the attention kernel

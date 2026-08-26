@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""End to end through the grid runner on a small model: coverage at theta 1
+"""End to end through the grid runner on a small model: longspec at theta 1
 and an uncapped budget reproduces dense greedy output token for token, and
 the drafter agrees with the target almost always. Slow: two engines."""
 import json
@@ -24,7 +24,7 @@ GRID = REPO / "benchmarks" / "longspec" / "grid.py"
 @pytest.mark.slow
 def test_full_budget_matches_dense(tmp_path):
     cmd = [sys.executable, str(GRID), "--cells",
-           "4096:2:dense,4096:2:coverage", "--parity",
+           "4096:2:dense,4096:2:longspec", "--parity",
            "--model", "Qwen/Qwen3-0.6B", "--gen", "64", "--theta", "1.0",
            "--ratio", "1.0", "--prompt-source", "synthetic",
            "--prompts-dir", str(tmp_path / "prompts"), "--out", str(tmp_path),
@@ -33,6 +33,6 @@ def test_full_budget_matches_dense(tmp_path):
     assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-4000:]
     records = [json.loads(line)
                for line in (tmp_path / "results.jsonl").read_text().splitlines()]
-    coverage = next(r for r in records if r["mode"] == "coverage")
-    assert coverage["alpha"] >= 0.98, coverage
+    longspec = next(r for r in records if r["mode"] == "longspec")
+    assert longspec["alpha"] >= 0.98, longspec
     assert json.loads((tmp_path / "parity.json").read_text())["ok"]

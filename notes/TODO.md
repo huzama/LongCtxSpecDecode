@@ -24,13 +24,13 @@ Pointers: [handoff.md](handoff.md) for what exists and what is measured, [litera
 - [x] Harness: the fork vendored, installed over the prebuilt wheel, no compile.
 - [x] Vegas on any GPU: score recompute and draft gather strategies, tests, config knobs.
 - [x] Baseline grid: dense and vegas at 32K-128K, batch 1 to saturation, on a quiet node; vegas acceptance reproduces its paper. Numbers in handoff.md.
-- [x] Method: coverage-budgeted drafting designed and implemented as `longspec`, unit tests and parity test green. Design and status in method.md.
-- [x] Grid T2-T4: coverage at θ 0.90/0.95/0.98 vs dense and vegas on the five cells. Numbers in handoff.md.
+- [x] Method: longspec drafting designed and implemented as `longspec`, unit tests and parity test green. Design and status in method.md.
+- [x] Grid T2-T4: coverage (selection alone) at θ 0.90/0.95/0.98 vs dense and vegas on the five cells. Numbers in handoff.md.
 - [x] Parity gate: `test_parity` (θ 1, uncapped) reproduces dense output token for token; `grid.py --parity` checks any cell.
 
 ## To do
 
-- [ ] 1. Head-to-head at matched bytes: θ between 0.90 and 0.95, cap 7% vs 15%, on a quiet node. Then T5, the skip ablation.
+- [ ] 1. Head-to-head at matched bytes: coverage with θ between 0.90 and 0.95, cap 7% vs 15%, on a quiet node. Then T5: longspec, the skip masks.
 - [ ] 2. Profile the draft step inside `propose()`: attention, weights, sampler, metadata rebuild; 64K batch 1 and 32K batch 4. Tells where c goes. The draft runs without CUDA graphs; that is a lead.
 
 ## Openings against Vegas

@@ -9,7 +9,7 @@ import torch
 
 from vllm.config.speculative import SpeculativeConfig
 from vllm.v1.spec_decode.sparse_attn.attn_overrider import BaseAttnOverrider
-from vllm.v1.spec_decode.sparse_attn.longspec import CoverageAttnOverrider
+from vllm.v1.spec_decode.sparse_attn.longspec import LongSpecAttnOverrider
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU")
 
@@ -21,7 +21,7 @@ SINK, RECENT, RATIO = 2, 4, 0.5
 def _vllm_config(**spec_kwargs):
     spec = SpeculativeConfig(
         method="sparse_attn", num_speculative_tokens=G,
-        sparse_attn_algorithm="coverage", sparse_attn_ratio=RATIO,
+        sparse_attn_algorithm="longspec", sparse_attn_ratio=RATIO,
         sparse_attn_min_tokens=0, sparse_attn_sink=SINK,
         sparse_attn_recent=RECENT, **spec_kwargs)
     model = SimpleNamespace(
@@ -38,7 +38,7 @@ def _vllm_config(**spec_kwargs):
 
 @pytest.fixture
 def harness():
-    ov = CoverageAttnOverrider(_vllm_config(sparse_attn_skip_attn_layers=[1]),
+    ov = LongSpecAttnOverrider(_vllm_config(sparse_attn_skip_attn_layers=[1]),
                                torch.device("cuda"))
     real = BaseAttnOverrider._original_attn_func
     calls = []

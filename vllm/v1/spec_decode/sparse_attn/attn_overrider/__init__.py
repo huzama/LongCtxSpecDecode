@@ -106,11 +106,11 @@ def build_attention_overrider(
     elif method == "vegas":
         from .vegas import VegasAttnOverrider
         cls = VegasAttnOverrider
-    elif method == "coverage":
+    elif method in ("coverage", "longspec"):
         from vllm.v1.spec_decode.sparse_attn.longspec import (
-            CoverageAttnOverrider,
+            LongSpecAttnOverrider,
         )
-        cls = CoverageAttnOverrider
+        cls = LongSpecAttnOverrider
     else:
         raise ValueError(f"Unknown sparse_attn_algorithm: {method}")
 

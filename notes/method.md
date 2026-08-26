@@ -1,8 +1,8 @@
-# Coverage-budgeted self-speculative drafting
+# LongSpec: attention-mass budgeted self-speculative drafting
 
 **TL;DR.** The target model drafts g tokens over a per-layer, per-request KV subset chosen once per round from the last verify pass's real attention weights: sink and recency reserved, top-p over the rest. Budget zero is allowed. Static per-layer skip masks are an ablation knob. Verify is full KV, lossless.
 
-Status: implemented as `CoverageAttnOverrider` in `longspec/`, unit tests green, parity test in place. Goals and status: [TODO.md](TODO.md). Measured baseline: [handoff.md](handoff.md).
+Two names, one overrider: `coverage` is the selection alone (steps 1-3 and 5-6 below, no skip masks), `longspec` is the full method with the skip masks of step 4. Status: implemented as `LongSpecAttnOverrider` in `longspec/`, unit tests green, parity test in place. Goals and status: [TODO.md](TODO.md). Measured baseline: [handoff.md](handoff.md).
 
 ## Symbols
 
@@ -13,7 +13,7 @@ Status: implemented as `CoverageAttnOverrider` in `longspec/`, unit tests green,
 | m_l[t] | score of token t < P at layer l: mean over the 2 query rows and all query heads of the softmax weight |
 | tail | tokens after P: the just-verified tokens plus this round's draft tokens. Always attended |
 | S, R | sink [0, S) and recency [P-R, P). Always attended |
-| θ | coverage target, one value for all layers |
+| θ | mass target, one value for all layers |
 | k_l | top-p count of layer l, per request |
 | used_l | tokens the draft attends at layer l: S + R + k_l + tail |
 
@@ -79,8 +79,8 @@ Explicit typed fields on `SpeculativeConfig`, the vLLM convention.
 
 | Knob | Config field | Start |
 |---|---|---|
-| algorithm | `sparse_attn_algorithm = "coverage"` | |
-| θ | `sparse_attn_coverage` | 0.9 |
+| algorithm | `sparse_attn_algorithm`: `"coverage"` selection alone, `"longspec"` with skip masks | |
+| θ | `sparse_attn_theta` | 0.9 |
 | S | `sparse_attn_sink` | 4 |
 | R | `sparse_attn_recent` | 64 |
 | k_min | `sparse_attn_min_tokens` | 0 |
@@ -99,7 +99,7 @@ Explicit typed fields on `SpeculativeConfig`, the vLLM convention.
 
 ## Selection kernel
 
-`longspec/kernels/coverage_select.py`, CUDA via `load_inline`, one 1024-thread block per row. Same key mapping and compaction as the fork's radix top-k, different objective:
+`longspec/kernels/mass_select.py`, CUDA via `load_inline`, one 1024-thread block per row. Same key mapping and compaction as the fork's radix top-k, different objective:
 
 | Pass | Work |
 |---|---|
@@ -118,16 +118,16 @@ Everything of ours is one package. The fork is entered at three seams.
 vllm/v1/spec_decode/sparse_attn/
   proposer.py                fork, +1 line: bind_model hook
   attn_overrider/
-    __init__.py              fork, +1 branch: dispatch "coverage"; bind_model no-op
+    __init__.py              fork, +1 branch: dispatch "longspec"; bind_model no-op
     vegas.py                 fork, imports our portable layer and slot table
     streamingllm.py, utils/  fork, untouched
   longspec/                  ours
-    __init__.py              exports CoverageAttnOverrider
+    __init__.py              exports LongSpecAttnOverrider
     config.py                typed view of the knobs, cross-field validation
     overrider.py             verify hook, draft hook, budgets [L, B]
     layer_skip.py            static whole-layer masks, eager only
     stats.py                 per-layer budget accumulators
-    kernels/                 c2q_scores, draft_gather, slot_table, coverage_select
+    kernels/                 c2q_scores, draft_gather, slot_table, mass_select
     portable/                score_collection, draft_kv, kernel_support
 
 tests/v1/spec_decode/sparse_attn/longspec/   one test file per module, test_parity end to end

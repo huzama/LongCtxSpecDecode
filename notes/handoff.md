@@ -18,11 +18,11 @@ Stock vegas is Hopper-only twice: its scores come from a patched FlashAttention-
 
 Tests: `tests/v1/spec_decode/sparse_attn/longspec/`.
 
-## Built: coverage drafter
+## Built: longspec drafter
 
-The method of [method.md](method.md), as `CoverageAttnOverrider` in `longspec/`: per-layer, per-request budgets from a coverage target, sink and recency reserved, one fused CUDA selection per round over all layers, static attention and whole-layer skip masks, per-layer budget statistics. Config: `sparse_attn_algorithm="coverage"` plus `sparse_attn_coverage`, `sparse_attn_sink`, `sparse_attn_recent`, `sparse_attn_skip_attn_layers`, `sparse_attn_skip_layers`. Grid runner: `benchmarks/longspec/grid.py`.
+The method of [method.md](method.md), as `LongSpecAttnOverrider` in `longspec/`: per-layer, per-request budgets from an attention-mass target, sink and recency reserved, one fused CUDA selection per round over all layers, static attention and whole-layer skip masks, per-layer budget statistics. Two names for one overrider: `coverage` is the selection alone, `longspec` adds the skip masks. Config: `sparse_attn_algorithm="coverage"` or `"longspec"` plus `sparse_attn_theta`, `sparse_attn_sink`, `sparse_attn_recent`, `sparse_attn_skip_attn_layers`, `sparse_attn_skip_layers`. Grid runner: `benchmarks/longspec/grid.py`.
 
-Grid, one pass: Qwen3-4B, one A6000, pg19, greedy, 256 tokens, serial cells, g = 6. Vegas at 7%; coverage with sink 4, recent 64, min 0, cap 15%. 64K and 128K use YaRN (factor 2 and 4 on the 40960 window), 32K none. Decode tok/s; ratio against dense at the same cell; KV read is the mean over layers of the selected fraction of the scored prefix.
+Grid, one pass: Qwen3-4B, one A6000, pg19, greedy, 256 tokens, serial cells, g = 6. Vegas at 7%; coverage (selection alone, no skip masks) with sink 4, recent 64, min 0, cap 15%. 64K and 128K use YaRN (factor 2 and 4 on the 40960 window), 32K none. Decode tok/s; ratio against dense at the same cell; KV read is the mean over layers of the selected fraction of the scored prefix.
 
 | ctx | batch | dense | vegas 7% | coverage θ 0.90 | coverage θ 0.95 | coverage θ 0.98 |
 |---|---|---|---|---|---|---|

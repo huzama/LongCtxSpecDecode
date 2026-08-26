@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Fused coverage selection: find k by attention mass, write the indices.
+"""Fused mass selection: find k by attention mass, write the indices.
 
 One CUDA block per row of a ``[rows, max_len]`` metric. A row is one request
 at one layer: the per-token attention mass of the scored prefix ``[0, P)``.
@@ -34,7 +34,7 @@ _CUDA_SRC = r"""
 #include <c10/cuda/CUDAStream.h>
 #include <cub/block/radix_rank_sort_operations.cuh>
 
-namespace coverage_select {
+namespace mass_select {
 
 constexpr int BitsPerPass = 8;
 constexpr int NumBuckets = 1 << BitsPerPass;
@@ -342,9 +342,9 @@ __global__ void __launch_bounds__(BlockSize) SelectKernel(
         }                                                                     \
     }()
 
-} // namespace coverage_select
+} // namespace mass_select
 
-void launch_coverage_select(
+void launch_mass_select(
     at::Tensor metric, at::Tensor valid_lens, at::Tensor k_min,
     at::Tensor k_max, at::Tensor out_idx, at::Tensor used,
     double theta, int64_t sink, int64_t recent) {
@@ -368,8 +368,8 @@ void launch_coverage_select(
     const c10::cuda::OptionalCUDAGuard guard(metric.device());
     const cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
     DISPATCH_FLOAT_TYPES(metric.scalar_type(), DType, [&] {
-        coverage_select::SelectKernel<DType>
-            <<<rows, coverage_select::BlockSize, 0, stream>>>(
+        mass_select::SelectKernel<DType>
+            <<<rows, mass_select::BlockSize, 0, stream>>>(
             static_cast<DType*>(metric.data_ptr()),
             static_cast<int32_t*>(valid_lens.data_ptr()),
             static_cast<int32_t*>(k_min.data_ptr()),
@@ -386,7 +386,7 @@ void launch_coverage_select(
 """
 
 _CPP_SRC = """
-void launch_coverage_select(
+void launch_mass_select(
     at::Tensor metric, at::Tensor valid_lens, at::Tensor k_min,
     at::Tensor k_max, at::Tensor out_idx, at::Tensor used,
     double theta, int64_t sink, int64_t recent);
@@ -401,10 +401,10 @@ def _get_module():
     if _module is None:
         os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0;8.9;9.0")
         _module = load_inline(
-            name="coverage_select_jit",
+            name="longspec_select_jit",
             cpp_sources=_CPP_SRC,
             cuda_sources=_CUDA_SRC,
-            functions=["launch_coverage_select"],
+            functions=["launch_mass_select"],
             extra_cuda_cflags=["-O3", "-std=c++17", "--expt-relaxed-constexpr",
                                "--expt-extended-lambda"],
             verbose=False,
@@ -412,7 +412,7 @@ def _get_module():
     return _module
 
 
-def coverage_select(
+def mass_select(
     metric: torch.Tensor,      # [rows, max_len] bf16/fp16/fp32, contiguous
     valid_lens: torch.Tensor,  # [rows] int32
     k_min: torch.Tensor,       # [rows] int32
@@ -424,6 +424,6 @@ def coverage_select(
     recent: int,
 ) -> None:
     """Select per row; see the module docstring for the contract."""
-    _get_module().launch_coverage_select(
+    _get_module().launch_mass_select(
         metric, valid_lens, k_min, k_max, table, used, float(theta),
         int(sink), int(recent))

@@ -71,16 +71,17 @@ Key knobs (`speculative_config`):
 
 | Field | Meaning | Default |
 | --- | --- | --- |
-| `sparse_attn_algorithm` | `"vegas"`, `"streamingllm"`, or `"coverage"` | `"streamingllm"` |
-| `sparse_attn_ratio` | Fraction of KV kept for drafting; the cap for `coverage` | `0.05` |
+| `sparse_attn_algorithm` | `"vegas"`, `"streamingllm"`, `"coverage"` (attention-mass selection alone), or `"longspec"` (the same plus layer skip masks) | `"streamingllm"` |
+| `sparse_attn_ratio` | Fraction of KV kept for drafting; the cap for `coverage` and `longspec` | `0.05` |
 | `sparse_attn_min_tokens` | Floor on the per-request KV budget | `256` |
 | `num_speculative_tokens` | Draft length per step | / |
-| `sparse_attn_coverage` | `coverage` only: attention mass each layer's draft must capture | `0.9` |
-| `sparse_attn_sink`, `sparse_attn_recent` | `coverage` only: tokens always kept at the start and the end of the scored prefix | `4`, `64` |
-| `sparse_attn_skip_attn_layers`, `sparse_attn_skip_layers` | `coverage` only: layers the draft skips (attention sublayer, or the whole layer with `enforce_eager`) | `[]` |
+| `sparse_attn_theta` | `coverage`, `longspec`: attention mass each layer's draft must capture | `0.9` |
+| `sparse_attn_sink`, `sparse_attn_recent` | `coverage`, `longspec`: tokens always kept at the start and the end of the scored prefix | `4`, `64` |
+| `sparse_attn_skip_attn_layers`, `sparse_attn_skip_layers` | `longspec` only: layers the draft skips (attention sublayer, or the whole layer with `enforce_eager`) | `[]` |
 
-`coverage` is our method: per-layer, per-request budgets from a coverage
-target instead of one global ratio. Design in `notes/method.md`; code under
+`coverage` and `longspec` are our method: per-layer, per-request budgets from an
+attention-mass target instead of one global ratio, and for `longspec` the layer
+skip masks on top. Design in `notes/method.md`; code under
 `vllm/v1/spec_decode/sparse_attn/longspec/`; grid runner in
 `benchmarks/longspec/grid.py`.
 

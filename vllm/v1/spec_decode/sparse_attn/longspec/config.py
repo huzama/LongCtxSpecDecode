@@ -1,17 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Typed view of the coverage knobs on the speculative config.
+"""Typed view of the longspec knobs on the speculative config.
 
-The pydantic fields carry the per-field ranges; this view carries the
-cross-field rules: skip masks index real layers, no layer is in both masks,
-and whole-layer skips need eager execution because the compiled layer loop
-bakes Python conditionals in at trace time.
+Two names, one method: "coverage" is the attention-mass selection alone,
+"longspec" adds the layer skip masks. The pydantic fields carry the
+per-field ranges; this view carries the cross-field rules: "coverage" takes
+no masks, masks index real layers, no layer is in both masks, and whole-layer
+skips need eager execution because the compiled layer loop bakes Python
+conditionals in at trace time.
 """
 
 from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
-class CoverageConfig:
+class LongSpecConfig:
+    variant: str
     theta: float
     sink: int
     recent: int
@@ -23,12 +26,17 @@ class CoverageConfig:
     skip_layers: frozenset[int]
 
     @classmethod
-    def from_vllm_config(cls, vllm_config) -> "CoverageConfig":
+    def from_vllm_config(cls, vllm_config) -> "LongSpecConfig":
         spec = vllm_config.speculative_config
         model = vllm_config.model_config
         num_layers = model.get_num_layers(vllm_config.parallel_config)
+        variant = spec.sparse_attn_algorithm
         skip_attn = frozenset(spec.sparse_attn_skip_attn_layers)
         skip = frozenset(spec.sparse_attn_skip_layers)
+        if variant == "coverage" and (skip_attn or skip):
+            raise ValueError(
+                'sparse_attn_algorithm="coverage" is selection alone; use '
+                '"longspec" for the skip masks')
         _check_layers("sparse_attn_skip_attn_layers", skip_attn, num_layers)
         _check_layers("sparse_attn_skip_layers", skip, num_layers)
         both = skip_attn & skip
@@ -41,7 +49,8 @@ class CoverageConfig:
                 "sparse_attn_skip_layers needs enforce_eager=True: the "
                 "compiled layer loop cannot skip layers at runtime")
         return cls(
-            theta=spec.sparse_attn_coverage,
+            variant=variant,
+            theta=spec.sparse_attn_theta,
             sink=spec.sparse_attn_sink,
             recent=spec.sparse_attn_recent,
             min_tokens=spec.sparse_attn_min_tokens,

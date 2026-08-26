@@ -4,8 +4,8 @@ mass crossing, tie resolution, clamps, and empty rows."""
 import pytest
 import torch
 
-from vllm.v1.spec_decode.sparse_attn.longspec.kernels.coverage_select import (
-    coverage_select,
+from vllm.v1.spec_decode.sparse_attn.longspec.kernels.mass_select import (
+    mass_select,
 )
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU")
@@ -76,7 +76,7 @@ def run(metric, P_list, S, R, theta, k_min_list, k_max_list, width=None):
     width = width or (max(P_list) + S + R)
     table = torch.full((rows, width), -1, dtype=torch.int32, device=device)
     used = torch.full((rows,), -1, dtype=torch.int32, device=device)
-    coverage_select(metric, valid, k_min, k_max, table, used, theta, S, R)
+    mass_select(metric, valid, k_min, k_max, table, used, theta, S, R)
     return table, used
 
 

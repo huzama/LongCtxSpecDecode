@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Coverage-budgeted drafting: the attention overrider.
+"""LongSpec drafting: the attention overrider.
 
 Verify pass: every layer's attention hook writes its per-token metric into
 one row of a per-layer buffer; the last layer runs one fused selection over
@@ -17,8 +17,8 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.v1.spec_decode.sparse_attn.attn_overrider import BaseAttnOverrider
 
-from .config import CoverageConfig
-from .kernels.coverage_select import coverage_select
+from .config import LongSpecConfig
+from .kernels.mass_select import mass_select
 from .kernels.slot_table import index_to_slots
 from .layer_skip import install_layer_skip
 from .portable.draft_kv import build_draft_kv
@@ -29,11 +29,11 @@ from .stats import SelectionStats
 logger = init_logger(__name__)
 
 
-class CoverageAttnOverrider(BaseAttnOverrider):
+class LongSpecAttnOverrider(BaseAttnOverrider):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
-        self.cfg = cfg = CoverageConfig.from_vllm_config(vllm_config)
+        self.cfg = cfg = LongSpecConfig.from_vllm_config(vllm_config)
         spec = vllm_config.speculative_config
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -57,9 +57,10 @@ class CoverageAttnOverrider(BaseAttnOverrider):
             model_config.get_num_kv_heads(parallel_config),
             model_config.get_head_size(), model_config.dtype)
         logger.info(
-            "Coverage on FA%d: theta %.3f, sink %d, recent %d, cap ratio %.3f, "
+            "%s on FA%d: theta %.3f, sink %d, recent %d, cap ratio %.3f, "
             "min %d, attn-skip %s, layer-skip %s; scores via %s, draft KV via "
-            "%s", fa_version, cfg.theta, cfg.sink, cfg.recent, cfg.ratio,
+            "%s", cfg.variant, fa_version, cfg.theta, cfg.sink, cfg.recent,
+            cfg.ratio,
             cfg.min_tokens, sorted(cfg.skip_attn_layers),
             sorted(cfg.skip_layers), type(self._scores).__name__,
             type(self._draft_kv).__name__)
@@ -81,7 +82,7 @@ class CoverageAttnOverrider(BaseAttnOverrider):
         self.batch_size = 0
 
         # Compile the selection kernel now, outside any graph capture.
-        coverage_select(
+        mass_select(
             torch.zeros(1, 16, dtype=torch.bfloat16, device=device),
             torch.zeros(1, **i32), torch.zeros(1, **i32), torch.zeros(1, **i32),
             torch.zeros(1, 16, **i32), torch.zeros(1, **i32),
@@ -162,7 +163,7 @@ class CoverageAttnOverrider(BaseAttnOverrider):
         self._valid_all.copy_(self._valid_lens.unsqueeze(0).expand(layers, batch))
         self._k_min_all.copy_(self._k_min.unsqueeze(0).expand(layers, batch))
         self._k_max_all.copy_(self._k_max.unsqueeze(0).expand(layers, batch))
-        coverage_select(
+        mass_select(
             self._metric.view(layers * batch, self.max_model_len),
             self._valid_all.view(-1), self._k_min_all.view(-1),
             self._k_max_all.view(-1), self._table.view(layers * batch, -1),

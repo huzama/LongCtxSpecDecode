@@ -7,6 +7,6 @@ behind it. The fork is entered at three seams only: the overrider dispatcher,
 the proposer's model hook, and the speculative config fields.
 """
 
-from .overrider import CoverageAttnOverrider  # noqa: E402
+from .overrider import LongSpecAttnOverrider  # noqa: E402
 
-__all__ = ["CoverageAttnOverrider"]
+__all__ = ["LongSpecAttnOverrider"]
