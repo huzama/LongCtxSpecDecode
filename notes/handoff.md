@@ -40,6 +40,22 @@ Grid, one pass: Qwen3-4B, one A6000, pg19, greedy, 256 tokens, serial cells, g =
 
 Found on the way, fixed in our port: rows padded for a CUDA graph were scored with a block table of -1 (a read outside the cache); the draft's gathered scratch was allocated after vLLM's memory profiling. Found, not fixed: the draft step runs with no CUDA graphs at all (the drafter holds the model loaded before the graph wrapper), which is part of the measured c ≈ 0.8.
 
+## Built: packed verify attention
+
+FA2 packs the query heads of one kv head into the block row dimension only at `seqlen_q == 1`, so the 7-query verify read the KV once per query head: 4x the bytes at 38% occupancy (the round profile's unexplained term). `longspec/verify_attention.py` restores the packing: non-causal prefix call with the group reshaped into rows (`[B*T, Hq, D]` to `[B*T*G, Hk, D]`, split at the last page boundary at or below `seqused_k - T`), tiny causal tail over the last pages, `merge_attn_states` combine; the merged LSE feeds the score reduction. Static shapes, no host reads, FULL-graph safe. Gated per call (uniform multi-query decode shape, FA2, no window/softcap/alibi/sinks); kill switch `sparse_attn_packed_verify`; padded and empty-prefix rows masked so nothing NaNs. Kernel-level test matches the single causal call; parity green.
+
+A/B, coverage θ 0.98 cap 15%, quiet srv09, 512 tokens where marked:
+
+| cell | unpacked | packed |
+|---|---|---|
+| 32K b4, 256 tok | 111.5, tau 6.44 | **129.6 (+16%)**, tau 6.50 |
+| 32K b1, 512 tok | 46.3, tau 6.67 | 47.6, tau 6.89 |
+| 64K b1, 512 tok | 30.2, tau 6.01 | 29.9, tau 5.71 |
+| 64K b1, 512 tok, fresh prompt (srv07, contended: acceptance only) | tau 6.64 | tau 6.70 |
+
+- Acceptance is trajectory noise, not a systematic loss: the 64K tau gap flips sign on a fresh prompt. Output parity vs dense holds (the emitted tokens are the verify's greedy argmax by construction).
+- Batch 1 speed is flat because the prefix launches `B x Hk` blocks and vLLM pins FA2 FULL-graph `num_splits` to 1 (the FA2 wrapper refuses an explicit count above 1). Letting FA2's heuristic split (`num_splits=0`) fills the SMs but moved θ=1 acceptance on Qwen3-0.6B from 0.98+ to 0.946, below the parity gate; parked pending a precision look at the two-call bf16 merge. The win today is batch 2+, where blocks alone cover the SMs.
+
 ## Profiled: where a round goes
 
 `benchmarks/longspec/round_phases.py`: one cell under vLLM's torch profiler, 5-11 steady full-batch decode rounds, kernels attributed to vLLM's scopes by correlation id. Coverage θ 0.98, cap 15%. GPU ms per round; dense step from the same kind of trace. Kernel times are per-GPU and clean; the node carried four other one-GPU jobs, so CPU-side numbers read high.
