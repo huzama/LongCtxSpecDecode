@@ -167,7 +167,26 @@ class SparseAttnProposer:
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
         # This should be called BEFORE adjust_cudagraph_sizes_for_spec_decode.
+        # The drafter calls the inner model, which carries only piecewise
+        # wrappers; a FULL dispatch mismatches every wrapper's runtime mode
+        # and the whole draft forward runs eagerly, kernel by kernel.
+        if cudagraph_mode.has_mode(CUDAGraphMode.PIECEWISE):
+            cudagraph_mode = CUDAGraphMode.PIECEWISE
+        else:
+            cudagraph_mode = CUDAGraphMode.NONE
         self.cudagraph_dispatcher.initialize_cudagraph_keys(cudagraph_mode)
+
+        # The draft forward runs one token per request, so no dispatchable
+        # size exceeds the padded batch size. Trim the keys to that bound:
+        # the key set is what the capture pass captures and dispatch
+        # replays, and it must hold exactly the reachable sizes.
+        keys = self.cudagraph_dispatcher.cudagraph_keys[
+            CUDAGraphMode.PIECEWISE]
+        max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
+        bound = min((desc.num_tokens for desc in keys
+                     if desc.num_tokens >= max_num_seqs), default=None)
+        if bound is not None:
+            keys -= {desc for desc in keys if desc.num_tokens > bound}
 
     def get_draft_probs(
         self,
@@ -597,6 +616,12 @@ class SparseAttnProposer:
             self._determine_batch_execution_and_padding(
                 num_tokens, use_cudagraphs=use_cudagraphs
             )
+        if not is_graph_capturing:
+            # Dummy runs outside the capture window must not touch the
+            # piecewise wrappers: capturing is illegal there and replay
+            # belongs to propose(). Padding stays as dispatched so warmup
+            # exercises the captured shapes.
+            cudagraph_runtime_mode = CUDAGraphMode.NONE
 
         kwargs = dict(
             input_ids=self.input_ids[:num_input_tokens],

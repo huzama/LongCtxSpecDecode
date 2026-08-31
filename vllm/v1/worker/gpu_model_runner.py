@@ -5300,6 +5300,10 @@ class GPUModelRunner(
                     cudagraph_runtime_mode=runtime_mode,
                 )
 
+            if self.speculative_config and \
+                    self.speculative_config.method == "sparse_attn":
+                self._capture_drafter_cudagraphs()
+
             torch.cuda.synchronize()
             end_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
@@ -5325,6 +5329,34 @@ class GPUModelRunner(
             scope="local",
         )
         return cuda_graph_size
+
+    def _capture_drafter_cudagraphs(self) -> None:
+        """Capture the drafter's piecewise graphs over its own key set.
+
+        The drafter dispatches draft-step sizes (one token per request)
+        from its own dispatcher; the main capture loops only exercise the
+        runner's keys, so every drafter key is captured here or replay
+        would meet an uncaptured descriptor after the window closes.
+        """
+        assert isinstance(self.drafter, SparseAttnProposer)
+        keys = self.drafter.cudagraph_dispatcher.cudagraph_keys[
+            CUDAGraphMode.PIECEWISE
+        ]
+        sizes = sorted({desc.num_tokens for desc in keys}, reverse=True)
+        if is_global_first_rank():
+            sizes = tqdm(
+                sizes,
+                disable=not self.load_config.use_tqdm_on_load,
+                desc="Capturing CUDA graphs (draft, PIECEWISE)",
+            )
+        for num_tokens in sizes:
+            for _ in range(self.compilation_config.cudagraph_num_of_warmups):
+                self.drafter.dummy_run(
+                    num_tokens, use_cudagraphs=True, is_graph_capturing=False
+                )
+            self.drafter.dummy_run(
+                num_tokens, use_cudagraphs=True, is_graph_capturing=True
+            )
 
     def _capture_cudagraphs(
         self,
