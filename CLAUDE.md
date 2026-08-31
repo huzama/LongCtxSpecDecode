@@ -8,8 +8,11 @@ This repository is the Vegas vLLM fork (github.com/platformxlab/vegas, remote `u
 
 ## Environment
 
-- Only `/shared` is NFS-mounted across servers `srv01`-`srv09`; the checkout stays under `/shared`. Paths are user-specific: resolve the repo root with `git rev-parse --show-toplevel`.
-- This repo's `.venv` (Python 3.12) holds vLLM as an editable install over the prebuilt wheel of the base commit: `VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_LOCATION=https://wheels.vllm.ai/$(git rev-parse f49fd737a^)/vllm-0.16.0-cp38-abi3-manylinux_2_31_x86_64.whl pip install -e .`, no compile. Always run `.venv/bin/python`; never a system python, never `uv run`.
+- Every server `srv01`-`srv09` runs slurm; `srun` can land anywhere. Only `/shared` is NFS-mounted across them; the checkout stays under `/shared`. Paths are user-specific: resolve the repo root with `git rev-parse --show-toplevel`.
+- Partitions come per node (`srv0X`) and per GPU type: `a6000` = srv03/04/07/09, `a100` = srv04, `a5000` = srv01/06, `rtx3090` = srv02/05, `a6000pro` = srv08. Benchmarks stay on A6000s; add `--exclude=srv09` when srv09 should stay free for other jobs.
+- Only `srv09` has 10 GbE to the NFS storage; every other node sits on 1 GbE over WireGuard. I/O-heavy work (model loads, anything streaming from `/shared`) is fastest on `srv09`; other nodes work, minutes slower at engine start.
+- Jobs off `srv09` need `HF_HOME=/shared/huzama/hf_cache` (the shared model cache; `~/.cache/huggingface` exists only on srv09).
+- This repo's `.venv` (Python 3.12) holds vLLM as an editable install over the prebuilt wheel of the base commit: `VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_LOCATION=https://wheels.vllm.ai/$(git rev-parse f49fd737a^)/vllm-0.16.0-cp38-abi3-manylinux_2_31_x86_64.whl pip install -e .`, no compile. Always run `.venv/bin/python`; never a system python, never `uv run`. The venv's interpreter lives at `/shared/huzama/python/cpython-3.12.13-linux-x86_64-gnu`, so the venv runs on every node.
 - Their JIT top-k kernel needs `ninja` and `nvcc` on PATH: `export PATH="$PWD/.venv/bin:/usr/local/cuda/bin:$PATH" CUDA_HOME=/usr/local/cuda` from the repo root before any spec-mode run.
 - Cluster GPUs are sm86 (A6000 and similar); no sm90 exists here, so vLLM uses its FA2 path.
 - GPU work always runs as a slurm job or job step, never bare on a node. Slurm assigns the GPU; never set `CUDA_VISIBLE_DEVICES`. `ssh` is for CPU-side checks only.
