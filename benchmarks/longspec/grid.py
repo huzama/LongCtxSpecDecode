@@ -197,7 +197,8 @@ def speculative_config(args) -> dict | None:
     return cfg
 
 
-def build_engine(args):
+def build_engine(args, **overrides):
+    """``overrides`` are extra ``LLM`` keyword arguments, applied last."""
     from vllm import LLM
     factor = yarn_factor(args.ctx, args.gen)
     kwargs = dict(
@@ -215,6 +216,7 @@ def build_engine(args):
     if factor is not None:
         kwargs["hf_overrides"] = {"rope_parameters": yarn_parameters(
             args.model, factor)}
+    kwargs.update(overrides)
     return LLM(**kwargs), factor
 
 
