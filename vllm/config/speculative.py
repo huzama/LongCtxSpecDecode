@@ -216,6 +216,13 @@ class SpeculativeConfig:
     only) or a gather into page-aligned scratch that works with any paged
     kernel. "auto" uses token pages when the kernel accepts them."""
 
+    sparse_attn_draft_weights: str | None = None
+    """Checkpoint (HF id or path) whose weights the draft forward runs on,
+    for example a W4A16 copy of the target. Must be the target architecture;
+    the verify pass keeps the target weights, embeddings and lm_head are
+    shared, and draft activations and KV writes stay in the target dtype.
+    None drafts with the target weights."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -232,6 +239,9 @@ class SpeculativeConfig:
         # Eagle3 affects the computation graph because it returns intermediate
         # hidden states in addition to the final hidden state.
         factors.append(self.method == "eagle3")
+        # The draft weight copy is compiled as its own module; its
+        # quantization scheme changes that graph's structure.
+        factors.append(self.sparse_attn_draft_weights)
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 

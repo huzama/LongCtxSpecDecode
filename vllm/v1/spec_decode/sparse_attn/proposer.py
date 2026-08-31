@@ -556,8 +556,17 @@ class SparseAttnProposer:
         )
 
     def load_model(self, target_model: nn.Module) -> None:
-        # Self-speculative decoding
-        self.model = target_model
+        # Self-speculative decoding: the draft runs the target weights,
+        # or a separately quantized copy that shares the target's
+        # attention modules, embeddings and lm_head.
+        draft_weights = self.speculative_config.sparse_attn_draft_weights
+        if draft_weights is not None:
+            from vllm.v1.spec_decode.sparse_attn.draft_weights import (
+                load_draft_model)
+            self.model = load_draft_model(
+                self.vllm_config, target_model, draft_weights)
+        else:
+            self.model = target_model
 
         # Register attention layers and their metadata builders.
         self.attn_layer_names = list(get_layers_from_vllm_config(
