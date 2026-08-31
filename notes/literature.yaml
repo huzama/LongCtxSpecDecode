@@ -415,7 +415,10 @@ papers:
     max_ctx: "128K"
     acceptance: "91.6% α @16K → 94.3% α @128K (rises with length)"
     speedup: "1.35x @4K → 2.49x @128K"
-    note: "Quantized beats sparse drafter KV for draft-target agreement"
+    note: >-
+      Quantized beats sparse drafter KV for draft-target agreement (91.2% vs
+      SnapKV 72.5% at 32K). The 128K run is tensor-parallel over 2 GPUs at 61
+      GB peak. Combining with sparse KV is left as future work
   - name: "VeriCache"
     arxiv: "2605.17613"
     year: 2026
@@ -775,7 +778,13 @@ papers:
     summary: "Speculation at production concurrency"
     lossless: true
     speedup: "1.4–2.0x at production batch (vs 2–3x @bs=1)"
-    note: "The concurrency-compression datapoint"
+    max_ctx: "8K"
+    note: >-
+      The concurrency-compression datapoint: vLLM EAGLE falls from 1.3x to
+      0.7x as batch goes 2 -> 48 at 8K. Table 2 quantizes the trained draft's
+      FFN: INT4 keeps accepted length flat (Llama-3.1-8B 2.79 -> 2.76, 70B 2.95
+      -> 2.96) and cuts draft latency 4% (8B) to 17% (70B); attention stays
+      bf16
   - name: "DSpark"
     arxiv: "2607.05147"
     year: 2026
@@ -1026,8 +1035,13 @@ papers:
     family: compressed-draft
     summary: "W4A4 draft verified by the W4A16 target; same weights, no extra memory"
     lossless: true
-    speedup: "1.35–1.64x @batch 8–32"
-    note: "Genuinely training-free, and it runs out of memory at batch 32 for 8B/13B: KV capacity binds exactly where the paper stops"
+    acceptance: "92.1-95.5% per token in vLLM, batch 1-32"
+    speedup: "1.35–1.64x @batch 8–32 (L20 GPUs); 1.24x mean in vLLM on an A100-40GB"
+    note: >-
+      Genuinely training-free, and it runs out of memory at batch 32 for
+      8B/13B: KV capacity binds exactly where the paper stops. Appendix A.6, an
+      A100-40GB in vLLM: AWQ W4A16 is faster than FP16 at batch 8 and slower
+      at 16 and 32, the Ampere break-even for any W4A16 draft
   - name: "ML-SpecQD"
     arxiv: "2503.13565"
     year: 2025
@@ -1037,7 +1051,7 @@ papers:
     max_ctx: "≤4K"
     acceptance: "71–91%"
     speedup: "1.86–2.03x; 2.22–2.72x multi-level"
-    note: "CPU only, batch 1"
+    note: "CPU only, batch 1; the MXFP4 copy adds ~25% of the bf16 weight size"
   - name: "SubSpec"
     arxiv: "2509.18344"
     year: 2025
@@ -1069,7 +1083,14 @@ papers:
     year: 2024
     family: compressed-draft
     summary: "One-shot cosine criterion for dropping whole attention sublayers"
-    note: "Attention is 3–4x more redundant than MLP, and dropping 20 of 40 attention sublayers is also a ~50% KV cut: the depth lever that touches the dominant term"
+    max_ctx: "14K in-context check"
+    note: >-
+      Llama-3-8B attention-only drop, avg benchmark delta: 8 of 32 sublayers
+      -0.2, 12 -1.8, 16 -12.2, 20 -29.0; Llama-2-13B MLP-8 -6.3 where Attn-8
+      is -0.1. Dropping 20 of 40 attention sublayers is also a 50% KV cut (52
+      -> 26 GB at batch 32, 2K): the depth lever that touches the dominant
+      term. Holds on an in-context task to 14K. Benchmark averages only, no
+      agreement metric
   - name: "TEAL"
     arxiv: "2408.14690"
     year: 2025
@@ -1085,6 +1106,110 @@ papers:
     summary: "A contextually sparse model generates and the dense model corrects every 16 tokens"
     lossless: false
     note: "The authors measured sparse drafts inside speculation and rejected it: acceptance plateaus. The standing counter-hypothesis for any sparse-draft method"
+  - name: "FinerCut"
+    arxiv: "2405.18218"
+    year: 2024
+    family: compressed-draft
+    summary: "Greedy training-free sublayer removal by output-distribution divergence (JS, angular, or L2) against the full model"
+    max_ctx: "short"
+    note: >-
+      Llama-3-8B at 25% of sublayers removed: 7 attention-only plus 3 whole
+      blocks, all at depth 13-28 of 32; avg accuracy 60.1 vs 68.0, WikiText-2
+      ppl 23.06 vs 11.31; ShortGPT at the same ratio 40.6 and ppl ~1e3.
+      Llama-3-70B: 34 of 80 attention sublayers removable at 99%. Attention
+      skips sit mid-depth, whole-block skips in the last third, never the
+      final layer. The JS criterion is draft-target divergence, an acceptance
+      proxy that needs no decode run
+  - name: "BlockPruner"
+    arxiv: "2406.10594"
+    year: 2024
+    family: compressed-draft
+    summary: "Training-free iterative pruning of attention and MLP blocks separately, ranked by the perplexity increase when masked"
+    max_ctx: "2K"
+    note: >-
+      Below a 17% pruning ratio, attention-only pruning loses less than MLP
+      pruning and matches mixed pruning (Llama-2-7B/13B). Qwen1.5-7B at 21.8%:
+      avg 54.7 vs 65.5, ppl 20.6 vs 8.0; Llama-2-7B at 22.0%: 60.2 vs 69.0.
+      Larger models carry more redundant attention blocks
+  - name: "The Unreasonable Ineffectiveness of the Deeper Layers"
+    arxiv: "2403.17887"
+    year: 2024
+    family: compressed-draft
+    summary: "Prunes a contiguous block of layers chosen by angular distance; reports the pruning fraction where accuracy collapses"
+    max_ctx: "2K-4K"
+    note: >-
+      With QLoRA healing the collapse sits near 45-55% of layers for Llama-2,
+      35% for Mistral-7B, 25% for Phi-2, 20% for the Qwen family (7B, 14B);
+      unhealed collapses slightly earlier, no per-model unhealed fractions
+      given. The final layer is maximally dissimilar to its neighbors: never
+      drop it
+  - name: "No Free Swap"
+    arxiv: "2605.16234"
+    year: 2026
+    family: compressed-draft
+    summary: "Layer redundancy by swap-KL of output distributions on Qwen3-8B and Llama-3.1-8B"
+    max_ctx: "512-token windows"
+    note: >-
+      Qwen3-8B (36 layers) has no adjacent pair below KL 0.10 (best 15<->17 at
+      0.171); Llama-3.1-8B has 27 of 31 pairs below 0.05 (best 0.005). Removing
+      1/3/5 layers of Qwen3-8B costs +2.5/+10.2/+45.4% ppl with the better
+      protocol (layer 17 first, the 15-21 core); Llama-3.1-8B +9.2/+40/+85%.
+      Qwen3 whole-layer slack is small and mid-depth
+  - name: "Data-Free Pruning of Self-Attention Layers"
+    arxiv: "2512.20636"
+    year: 2025
+    family: compressed-draft
+    summary: "Removes attention sublayers without data; removed layers concentrate in the deep half"
+    note: >-
+      Llama-3.1-8B WikiText-2 ppl by attention sublayers removed: 0 -> 6.30,
+      4 -> 6.67, 7 -> 7.74, 10 -> 11.55, 13 -> 15.65. Random attention removal
+      is catastrophic; whole-block removal underperforms sublayer removal. Not
+      checked at the source
+  - name: "SPEQ"
+    arxiv: "2510.18525"
+    year: 2025
+    family: compressed-draft
+    summary: "4-bit draft carved from the bit pattern of the FP16 target weights (shared exponent bits plus a correction flag), verified by the full model"
+    lossless: true
+    max_ctx: "1K prefill + 1K decode"
+    acceptance: "0.976 mean per token over 15 model-task pairs; 0.965 (Llama-3.2-3B) to 0.990 (Llama-2-13B)"
+    speedup: "2.07x vs FP16 on a simulated 28nm accelerator"
+    note: >-
+      No second weight copy and no training: the acceptance to expect from a
+      same-weights 4-bit draft at 3B-13B. No GPU kernel exists; batch size
+      unstated
+  - name: "Quantize the Target, Quantize the Drafter"
+    arxiv: "2607.04244"
+    year: 2026
+    family: compressed-draft
+    summary: "INT4 target with an INT4 GPTQ drafter on Qwen3.5-4B"
+    note: >-
+      Mean accepted length 5.03 (bf16 target and drafter) vs 4.98 (INT4 both);
+      drafter PTQ variants RTN 4.91, AWQ 4.92, GPTQ 4.98; batch 1 on an RTX 5000
+      Ada. Not checked at the source
+  - name: "Marlin"
+    arxiv: "2408.11743"
+    year: 2024
+    family: compressed-draft
+    summary: "W4A16 GEMM kernel for Ampere that holds the 4-bit speedup into the batched regime"
+    note: >-
+      The dequantization-cost curve for a 4-bit draft on our hardware class:
+      3.87x over FP16 up to batch 16-32 on an A10 (sm86, like the A6000),
+      towards 1.5x at batch 128; older kernels (ExLlamaV2, AWQ, bitsandbytes)
+      hold 3.9x only at batch 1. End-to-end Llama-2-7B in vLLM on an A10: 2.93x
+      at batch 1, 2.90x at 8, 2.26x at 32, 1.20x at 128. A100 gains are
+      smaller: more bandwidth hides less
+  - name: "QServe"
+    arxiv: "2405.04532"
+    year: 2024
+    family: compressed-draft
+    summary: "W4A8KV4 serving; its roofline places the W4A16 vs W8A8 crossover"
+    note: >-
+      A100 roofline: W4A16 beats W8A8 below 78 concurrent sequences, W8A8
+      above. FP32 CUDA-core peak is 2% of INT4 tensor-core peak, so
+      dequantization in the GEMM main loop is the cost past that point (20-90%
+      overhead for existing INT4 methods). At max-throughput batch on an A100,
+      TensorRT-LLM W4A16 equals FP16 on Llama-2-7B (1549 tok/s)
 
   # --- RL rollout acceleration ---
   - name: "Speculative decoding in NeMo-RL"
@@ -1348,6 +1473,49 @@ findings:
         rows and a gather draft: acceptance reproduces the paper (tau 6.14 on
         their AIME benchmark shape vs their ~6.1), speed does not (0.24-0.90x
         across regimes on one A6000).
+    - id: 20
+      fact: >-
+        Training-free depth reduction is attention-first: attention sublayers
+        go before MLP sublayers, mid-depth before the last layer, and the Qwen
+        family has the least whole-layer slack
+      evidence: >-
+        LLM-Drop: Llama-3-8B loses 0.2 points at 8 of 32 attention sublayers
+        dropped, 12.2 at 16; MLP-8 costs 6.3 where Attn-8 costs 0.1
+        (2406.15786). BlockPruner: attention-only beats MLP pruning below a 17%
+        ratio (2406.10594). FinerCut: 25% of Llama-3-8B sublayers removable at
+        88% accuracy, attention skips at depth 13-28, whole blocks only in the
+        last third (2405.18218). Qwen collapses near 20% of layers where
+        Llama-2 holds to 45-55% (2403.17887); Qwen3-8B has no adjacent layer
+        pair below swap-KL 0.10 where Llama-3.1-8B has 27 of 31 (2605.16234).
+        Not found: per-token acceptance for any skip schedule, Qwen3-4B
+        numbers, agreement past 14K.
+    - id: 21
+      fact: >-
+        W4A16 dequantization hides under memory bandwidth at decode batch up
+        to ~8 on Ampere and becomes the cost above it
+      evidence: >-
+        Marlin on an A10: 3.87x over FP16 up to batch 16-32, towards 1.5x at
+        128; end-to-end Llama-2-7B in vLLM 2.93x at batch 1, 2.26x at 32,
+        1.20x at 128; older kernels hold 3.9x only at batch 1 (2408.11743).
+        QSpec appendix A.6, A100-40GB in vLLM: AWQ faster than FP16 at batch 8,
+        slower at 16 and 32 (2410.11305). QServe roofline: W4A16 beats W8A8
+        below 78 sequences; CUDA-core peak is 2% of INT4 tensor-core peak;
+        TensorRT-LLM W4A16 equals FP16 at max-throughput batch on an A100
+        (2405.04532). Our cells are batch 1-4, inside the free region. No
+        A6000 sweep exists.
+    - id: 22
+      fact: >-
+        A low-bit copy of the target's own weights drafts at 0.71-0.99
+        per-token acceptance, but nobody has measured it on a GPU at 4B-8B,
+        32K-128K, batch 1-4
+      evidence: >-
+        SPEQ 0.976 mean on 3B-13B, simulated accelerator (2510.18525);
+        ML-SpecQD 71-91% at 4K on CPU (2503.13565); QuantSpec 91-94% with INT4
+        weights plus INT4/INT8 KV at 32K-128K, batch 1 (2502.10424); Meta's
+        INT4 draft FFN keeps accepted length flat at a 4-17% latency cut
+        (2508.08192). Second-copy memory: ~25% of bf16 weights (ML-SpecQD),
+        avoidable by bit sharing (SPEQ; NestedFP 2506.02024); no paper reports
+        it at 128K.
 
   contested:
     - id: 1
@@ -1413,6 +1581,15 @@ findings:
       verdict: >-
         Both true. A lossless verifier computes exact target logprobs anyway, so
         exposing them dissolves the conflict.
+    - id: 11
+      question: Do layer skip or weight quantization compose with a sparse-KV draft?
+      side_a: "Costs multiply (arithmetic 7, 11): attention-sublayer skip plus per-layer KV budgets is +21-28%"
+      side_b: "Acceptance multiplies down too (0.9 x 0.85 gives tau -23%); QuantSpec found quantized KV beats sparse KV for agreement (91% vs 72.5%) and never combined them"
+      verdict: >-
+        Unmeasured anywhere: Vegas says such methods 'can be applied in
+        conjunction' and runs nothing; QuantSpec defers it to future work;
+        SparseSpec-L, SparseSpec, BudgetDraft and Dustin are sparse-KV only
+        with bf16 weights. Our skip ablation is the first data point.
 
   arithmetic:
     constants: >-
