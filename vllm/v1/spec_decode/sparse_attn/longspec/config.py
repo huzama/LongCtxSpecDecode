@@ -22,6 +22,7 @@ class LongSpecConfig:
     ratio: float
     num_spec_tokens: int
     num_layers: int
+    packed_verify: bool
     skip_attn_layers: frozenset[int]
     skip_layers: frozenset[int]
 
@@ -57,6 +58,7 @@ class LongSpecConfig:
             ratio=spec.sparse_attn_ratio,
             num_spec_tokens=spec.num_speculative_tokens,
             num_layers=num_layers,
+            packed_verify=spec.sparse_attn_packed_verify,
             skip_attn_layers=skip_attn,
             skip_layers=skip,
         )

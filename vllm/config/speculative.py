@@ -199,6 +199,12 @@ class SpeculativeConfig:
     """Layers the "longspec" draft bypasses entirely. Requires enforce_eager.
     Not allowed with "coverage"."""
 
+    sparse_attn_packed_verify: bool = True
+    """Pack the query heads of each KV head into the row dimension of the
+    "coverage" and "longspec" verify pass so FA2 reads the KV cache once
+    instead of once per query head. Applies to the uniform multi-query
+    decode shape on FA2; other shapes and kernels run unchanged."""
+
     sparse_attn_score_source: Literal["auto", "kernel", "recompute"] = "auto"
     """Where the verification-guided scores come from: the attention kernel
     (needs the vegas flash-attention fork's FA3 op) or a fused recomputation

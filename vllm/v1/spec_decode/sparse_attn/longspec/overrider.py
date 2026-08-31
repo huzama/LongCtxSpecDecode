@@ -25,6 +25,10 @@ from .portable.draft_kv import build_draft_kv
 from .portable.kernel_support import flash_attn_version
 from .portable.score_collection import build_score_collector
 from .stats import SelectionStats
+from .verify_attention import (
+    packed_verify_attention,
+    packed_verify_eligible,
+)
 
 logger = init_logger(__name__)
 
@@ -48,22 +52,27 @@ class LongSpecAttnOverrider(BaseAttnOverrider):
         self.max_blocks = (self._width + self.block_size - 1) // self.block_size
 
         fa_version = flash_attn_version()
+        num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        # FA3's scheduler packs GQA on its own; FA2 only at one query.
+        self._group = num_query_heads // num_kv_heads
+        self._packed_verify = (cfg.packed_verify and fa_version == 2
+                               and self._group > 1)
         self._scores = build_score_collector(
             spec.sparse_attn_score_source, fa_version, batch, num_query_heads,
             max_len, device)
         self._draft_kv = build_draft_kv(
             spec.sparse_attn_draft_kv, fa_version, layers, batch, self._width,
             self.block_size, device,
-            model_config.get_num_kv_heads(parallel_config),
+            num_kv_heads,
             model_config.get_head_size(), model_config.dtype)
         logger.info(
             "%s on FA%d: theta %.3f, sink %d, recent %d, cap ratio %.3f, "
             "min %d, attn-skip %s, layer-skip %s; scores via %s, draft KV via "
-            "%s", cfg.variant, fa_version, cfg.theta, cfg.sink, cfg.recent,
-            cfg.ratio,
+            "%s, packed verify %s", cfg.variant, fa_version, cfg.theta,
+            cfg.sink, cfg.recent, cfg.ratio,
             cfg.min_tokens, sorted(cfg.skip_attn_layers),
             sorted(cfg.skip_layers), type(self._scores).__name__,
-            type(self._draft_kv).__name__)
+            type(self._draft_kv).__name__, self._packed_verify)
 
         i32 = dict(dtype=torch.int32, device=device)
         self._metric = torch.zeros(layers, batch, max_len, dtype=torch.bfloat16,
@@ -115,7 +124,11 @@ class LongSpecAttnOverrider(BaseAttnOverrider):
 
         self._scores.verify_kwargs(kwargs, batch)
         kwargs["return_softmax_lse"] = True
-        out, lse = BaseAttnOverrider._original_attn_func(*args, **kwargs)
+        if self._packed_verify and packed_verify_eligible(kwargs, self._group):
+            out, lse = packed_verify_attention(
+                BaseAttnOverrider._original_attn_func, kwargs)
+        else:
+            out, lse = BaseAttnOverrider._original_attn_func(*args, **kwargs)
         scale = kwargs.get("softmax_scale")
         if scale is None:
             scale = kwargs["q"].shape[-1] ** -0.5

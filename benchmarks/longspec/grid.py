@@ -63,6 +63,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="comma list of layers whose attention the draft skips")
     p.add_argument("--skip-layers", default="",
                    help="comma list of layers the draft bypasses (eager)")
+    p.add_argument("--no-packed-verify", action="store_true",
+                   help="disable the GQA-packed verify attention")
     p.add_argument("--enforce-eager", action="store_true")
     p.add_argument("--gpu-mem-util", type=float, default=0.9)
     p.add_argument("--seed", type=int, default=42)
@@ -187,6 +189,8 @@ def speculative_config(args) -> dict | None:
         "sparse_attn_min_tokens": min_tokens,
     }
     if args.mode in ("coverage", "longspec"):
+        if args.no_packed_verify:
+            cfg["sparse_attn_packed_verify"] = False
         cfg.update({
             "sparse_attn_theta": args.theta,
             "sparse_attn_sink": args.sink,
@@ -321,6 +325,7 @@ def run_cell(args, run_dir: Path) -> dict:
         "min_tokens": speculative_config(args)["sparse_attn_min_tokens"] if spec else None,
         "skip_attn_layers": _int_list(args.skip_attn_layers),
         "skip_layers": _int_list(args.skip_layers),
+        "packed_verify": not args.no_packed_verify,
         "enforce_eager": args.enforce_eager or bool(_int_list(args.skip_layers)),
         "yarn_factor": factor, "prompt_source": args.prompt_source,
         "seed": args.seed,

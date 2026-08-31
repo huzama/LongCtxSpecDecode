@@ -25,6 +25,7 @@ def test_defaults_and_bounds():
     spec = _spec()
     assert (spec.sparse_attn_theta, spec.sparse_attn_sink,
             spec.sparse_attn_recent) == (0.9, 4, 64)
+    assert spec.sparse_attn_packed_verify is True
     assert _spec(sparse_attn_ratio=1.0).sparse_attn_ratio == 1.0
     assert _spec(sparse_attn_min_tokens=0).sparse_attn_min_tokens == 0
     with pytest.raises(ValueError):
