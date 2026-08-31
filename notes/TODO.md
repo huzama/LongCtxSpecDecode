@@ -27,11 +27,13 @@ Pointers: [handoff.md](handoff.md) for what exists and what is measured, [litera
 - [x] Method: longspec drafting designed and implemented as `longspec`, unit tests and parity test green. Design and status in method.md.
 - [x] Grid T2-T4: coverage (selection alone) at θ 0.90/0.95/0.98 vs dense and vegas on the five cells. Numbers in handoff.md.
 - [x] Parity gate: `test_parity` (θ 1, uncapped) reproduces dense output token for token; `grid.py --parity` checks any cell.
+- [x] Profile of the round at 32K b1, 32K b4, 64K b1: the verify attention reads the KV four times at 38% occupancy (FA2 packs GQA only at `seqlen_q == 1`); the draft step sits on the 8 GB weight floor; launch overhead is second order. Numbers in handoff.md.
 
 ## To do
 
-- [ ] 1. Head-to-head at matched bytes: coverage with θ between 0.90 and 0.95, cap 7% vs 15%, on a quiet node. Then T5: longspec, the skip masks.
-- [ ] 2. Profile the draft step inside `propose()`: attention, weights, sampler, metadata rebuild; 64K batch 1 and 32K batch 4. Tells where c goes. The draft runs without CUDA graphs; that is a lead.
+- [ ] 1. Verify attention for small `seqlen_q`: GQA packing plus split-KV, so the 7-query pass reads the KV once with full occupancy. Worth 0.9-1.8 dense steps per round (32K b1: 47 to ~24 ms verify), lossless, applies to vegas too. Candidates: vLLM's Triton unified attention for the verify call, FlashInfer, or an FA2 call shaped to trigger its packing. Gate: per-layer verify attention at 32K b1 near the dense 0.2 ms.
+- [ ] 2. Draft with W4A16 weights of the same model, bf16 verify: the draft step is 12.4 ms of weight reads out of 15.3; Marlin on sm86 is free at batch 1-8. Worth ~3 dense steps per round at 32K b1 if acceptance holds (literature: 0.9-0.98 per token, unmeasured with sparse KV).
+- [ ] 3. Head-to-head at matched bytes: coverage with θ between 0.90 and 0.95, cap 7% vs 15%, on a quiet node. Then T5: longspec, the skip masks.
 
 ## Openings against Vegas
 

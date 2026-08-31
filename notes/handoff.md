@@ -40,6 +40,22 @@ Grid, one pass: Qwen3-4B, one A6000, pg19, greedy, 256 tokens, serial cells, g =
 
 Found on the way, fixed in our port: rows padded for a CUDA graph were scored with a block table of -1 (a read outside the cache); the draft's gathered scratch was allocated after vLLM's memory profiling. Found, not fixed: the draft step runs with no CUDA graphs at all (the drafter holds the model loaded before the graph wrapper), which is part of the measured c ≈ 0.8.
 
+## Profiled: where a round goes
+
+`benchmarks/longspec/round_phases.py`: one cell under vLLM's torch profiler, 5-11 steady full-batch decode rounds, kernels attributed to vLLM's scopes by correlation id. Coverage θ 0.98, cap 15%. GPU ms per round; dense step from the same kind of trace. Kernel times are per-GPU and clean; the node carried four other one-GPU jobs, so CPU-side numbers read high.
+
+| cell | dense step | round GPU busy (steps) | verify (steps) | verify: attention / K scoring / weights | draft per step (steps) | draft: weights / attention / gather | sample + post |
+|---|---|---|---|---|---|---|---|
+| 32K b1 | 20.3 | 141 (6.9) | 47.3 (2.3) | 31.1 / 4.5 / 11.1 | 15.3 (0.75) | 12.4 / 1.8 / 0.4 | 2.3 |
+| 32K b4 | 34.0 | 198 (5.8) | 90.0 (2.6) | 65.0 / 12.3 / 12.1 | 17.7 (0.52) | 12.3 / 3.5 / 1.1 | 2.4 |
+| 64K b1 | 27.2 | 185 (6.8) | 83.0 (3.0) | 62.3 / 9.1 / 11.1 | 16.6 (0.61) | 12.4 / 2.8 / 0.8 | 2.3 |
+
+- The verify attention costs 4.4x the dense step's attention over the same KV (31.1 vs 7.5 ms at 32K b1, 62.3 vs 14.4 at 64K b1; 3.3x at 32K b4). Launch geometry from the trace: dense decode `flash_fwd_splitkv` grid (1, 17, 8), FA2 packing the 4 q heads of each kv head into one block (its `seqlen_q == 1` swap) and splitting the KV 17 ways, 136 blocks; the 7-query verify grid (1, 1, 32), one block per q head, no split, 32 blocks on 84 SMs. The draft, one query, packs again: (1, 20, 8), 0.034 ms per layer. So the verify reads the KV four times at 38% occupancy. That is the gap the byte model could not explain; the fix is an attention path with GQA packing and split-KV for small `seqlen_q` (FA2 has the packing only at 1; vLLM's Triton unified attention and FlashInfer pack by construction).
+- Weights: every forward reads 8 GB in 11.1-12.4 ms (gemm plus lm_head), 93% of the A6000's bandwidth. The draft step sits on that floor: 12.4 of 15.3 ms at 32K b1. Its attention over the 15% view is 1.8-3.5 ms per step, packed and split; the gather 0.4-1.1 ms.
+- Scoring on FA2 is one K read per verify (`_c2q_metric_kernel`): 4.5 / 12.3 / 9.1 ms, 0.2-0.4 dense steps. Selection kernel 0.5-1.0 ms per round. Sampler, rejection sampler and postprocess 2.3 ms.
+- CPU side: under the profiler the draft's CPU scope spans the whole round (192 ms against 92 ms of draft GPU work at 32K b1) while the verify replays a graph in 0.7 ms of CPU. Without the profiler the grid's round times sit 2-15% above GPU busy (32K b1 144 vs 141 ms, 64K b1 209 vs 185, 32K b4 231 vs 198, the latter two on a shared node). Launch overhead is second order; the profiler inflates it.
+- In dense-step units at 32K b1: verify 2.3 where bytes say 1.2, draft 4.5 where bytes say 4.1, sample 0.1. The excess is the verify attention.
+
 ## Measured
 
 Qwen3-4B, one A6000 (sm86, FA2), pg19, greedy, 256 tokens, serial cells on a quiet node; decode tok/s with prefill separated, ratio against dense at the same cell. The vegas column reproduced within 2% across two passes.
