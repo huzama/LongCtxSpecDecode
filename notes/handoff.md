@@ -52,9 +52,11 @@ A/B, coverage θ 0.98 cap 15%, quiet srv09, 512 tokens where marked:
 | 32K b1, 512 tok | 46.3, tau 6.67 | 47.6, tau 6.89 |
 | 64K b1, 512 tok | 30.2, tau 6.01 | 29.9, tau 5.71 |
 | 64K b1, 512 tok, fresh prompt (srv07, contended: acceptance only) | tau 6.64 | tau 6.70 |
+| 64K b2, 512 tok (srv03) | 55.5, tau 6.38 | 54.9, tau 6.36 |
 
 - Acceptance is trajectory noise, not a systematic loss: the 64K tau gap flips sign on a fresh prompt. Output parity vs dense holds (the emitted tokens are the verify's greedy argmax by construction).
-- Batch 1 speed is flat because the prefix launches `B x Hk` blocks and vLLM pins FA2 FULL-graph `num_splits` to 1 (the FA2 wrapper refuses an explicit count above 1). Letting FA2's heuristic split (`num_splits=0`) fills the SMs but moved θ=1 acceptance on Qwen3-0.6B from 0.98+ to 0.946, below the parity gate; parked pending a precision look at the two-call bf16 merge. The win today is batch 2+, where blocks alone cover the SMs.
+- Batch 1 speed is flat because the prefix launches `B x Hk` blocks and vLLM pins FA2 FULL-graph `num_splits` to 1 (the FA2 wrapper refuses an explicit count above 1). Letting FA2's heuristic split (`num_splits=0`) fills the SMs but moved θ=1 acceptance on Qwen3-0.6B from 0.98+ to 0.946, below the parity gate; parked pending a precision look at the two-call bf16 merge. Small batches stay flat: 64K b2 launches 16 blocks and measures even. The one measured win is 32K b4's 32 blocks; the gain should grow with `B x Hk`.
+- A first b2 run on a fresh node looked like a packed collapse (4.8 tok/s). Cause, from a faulthandler stack dump: vLLM's `gather_draft_hidden_states` JIT-compiles its CUDA module on first use, and first use is the first verified round with non-uniform draft counts, so a ~200 s ninja build landed inside the timed window (`~/.cache/torch_extensions` is per node; batch 1 takes the reshape path and never triggers it, which is why only b2 cells showed it, and only the first per node). `SparseAttnProposer.load_model` now builds the module eagerly.
 
 ## Profiled: where a round goes
 
