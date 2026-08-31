@@ -32,6 +32,7 @@ from vllm.v1.spec_decode.sparse_attn.attn_overrider import (
 )
 from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
+    _get_gather_cuda_module,
     eagle_prepare_inputs_padded_kernel,
     eagle_prepare_next_token_padded_kernel,
     gather_draft_hidden_states,
@@ -567,6 +568,11 @@ class SparseAttnProposer:
         self.positions = self.runner.positions.gpu
 
         self.attn_overrider.bind_model(self.model)
+
+        # gather_draft_hidden_states JIT-compiles its CUDA module on first
+        # use, which is the first verified round with non-uniform draft
+        # counts (batch >= 2, mid-decode). Build it here instead.
+        _get_gather_cuda_module()
 
     @torch.inference_mode()
     @_method_wrapper(enter_fn=_enter_propose, exit_fn=_exit_propose)
