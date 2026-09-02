@@ -81,7 +81,7 @@ Key knobs (`speculative_config`):
 
 `coverage` and `longspec` are our method: per-layer, per-request budgets from an
 attention-mass target instead of one global ratio, and for `longspec` the layer
-skip masks on top. Design in `notes/method.md`; code under
+skip masks on top. Design and results in `notes/DrafterGoesBurrrr.md`; code under
 `vllm/v1/spec_decode/sparse_attn/longspec/`; grid runner in
 `benchmarks/longspec/grid.py`.
 

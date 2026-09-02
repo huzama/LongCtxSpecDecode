@@ -7,7 +7,7 @@ all layers and requests. Draft pass: the first step converts the selected
 indices to slots and gathers them, every step appends the newest token, and
 masked layers return a zero attention output. All per-round work is static
 in shape and free of host syncs, so the verify pass can replay as a CUDA
-graph. Design: notes/method.md.
+graph. Design: notes/DrafterGoesBurrrr.md.
 """
 
 import torch

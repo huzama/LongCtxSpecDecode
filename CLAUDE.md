@@ -4,7 +4,7 @@ Guidance for Claude Code in this repository.
 
 ## Project
 
-This repository is the Vegas vLLM fork (github.com/platformxlab/vegas, remote `upstream`) plus `notes/`. Read `notes/TODO.md` first; it is the working contract. `notes/literature.yaml` is the surveyed literature. Branch `survey-and-prototypes` is an archive: read, never edit.
+This repository is the Vegas vLLM fork (github.com/platformxlab/vegas, remote `upstream`) plus `notes/`. Read `notes/TODO.md` first; it is the working contract. `notes/DrafterGoesBurrrr.md` is the method with its results. `notes/literature.yaml` is the surveyed literature. Branch `survey-and-prototypes` is an archive: read, never edit.
 
 ## Environment
 
