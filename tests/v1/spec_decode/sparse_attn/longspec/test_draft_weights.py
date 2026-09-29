@@ -38,3 +38,26 @@ def test_copied_weights_match_dense(tmp_path):
     longspec = next(r for r in records if r["mode"] == "longspec")
     assert longspec["alpha"] >= 0.98, longspec
     assert json.loads((tmp_path / "parity.json").read_text())["ok"]
+
+
+@pytest.mark.slow
+def test_quantized_draft_is_lossless(tmp_path):
+    """The verify emits its own argmax regardless of the draft, so a W4
+    drafter must reproduce dense output token for token; only acceptance
+    may move. Heavy: the 4B target and its W4 checkpoint."""
+    cmd = [sys.executable, str(GRID), "--cells",
+           "8192:2:dense,8192:2:coverage", "--parity",
+           "--model", "Qwen/Qwen3-4B",
+           "--draft-weights", "RedHatAI/Qwen3-4B-quantized.w4a16",
+           "--gen", "64", "--theta", "0.98", "--ratio", "0.15",
+           "--min-tokens", "0", "--prompt-source", "synthetic",
+           "--prompts-dir", str(tmp_path / "prompts"), "--out", str(tmp_path),
+           "--drain", "5", "--gpu-mem-util", "0.7"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-4000:]
+    records = [json.loads(line)
+               for line in (tmp_path / "results.jsonl").read_text().splitlines()]
+    coverage = next(r for r in records if r["mode"] == "coverage")
+    # Quantization costs acceptance, never output.
+    assert coverage["alpha"] >= 0.5, coverage
+    assert json.loads((tmp_path / "parity.json").read_text())["ok"]
