@@ -1,6 +1,6 @@
 # DrafterGoesBurrrr
 
-Lossless self-speculative decoding for long contexts. One model plays both roles. The drafter is the target made cheap three ways at once: it attends to a small KV view selected per layer and per request from the model's own attention mass, it runs on 4-bit weights (W4A16), and it replays CUDA graphs. The verifier is the unmodified target: full KV, bf16, one forward per round. Output equals dense greedy decoding token for token.
+Lossless self-speculative decoding for long contexts. One model plays both roles. The drafter is the target made cheap three ways at once: it attends to a small KV view selected per layer and per request from the model's own attention mass, it runs on 4-bit weights (W4A16), and it replays CUDA graphs. The verifier is the unmodified target: full KV, bf16, one forward per round. Output equals dense greedy decoding token for token. Each lever exposed the next: the sparse view made the draft weight-bound, 4-bit weights made it launch-bound, graphs made it GPU-bound again.
 
 | Cell | vs dense | vs vegas |
 |---|---|---|
@@ -44,8 +44,6 @@ Speedup per round is tau / (g c + 1) with c the draft step cost relative to a de
 | Budget | Per layer, per request: the smallest number of top tokens holding fraction θ of the attention mass (top-p over tokens). Layers differ; requests differ. |
 | Reserved | Sink and recent tokens are always kept and excluded from the candidates. The recent window is clipped to the prefix. |
 | Bounds | A floor (0 allowed) and a cap (a fraction of the prefix). The cap sizes the scratch; θ does the work. θ = 1 keeps every token. |
-| Kernel | One fused CUDA kernel, one 1024-thread block per row, grid L x B. Pass 1: total and reserved mass, count and mass histograms of the candidates on the high byte. Pass 2: same on the low byte inside the chosen bucket, tie count from the threshold value. Passes 3 and 4 only if the clamp moved the count: count-based radix select. Pass 5: compaction, strictly better keys front to back, ties back to front, then the reserved indices. No workspace, no allocation. |
-| Determinism | Shared-memory float atomics move the count by one element at near-exact crossings; tests allow that band and require exact agreement elsewhere. |
 | Freshness | Recomputed every round from the latest verify. Tables rebuild every propose, so budget changes are graph safe. |
 
 Fixed-k top-k (vegas) is the special case: same signal, uniform k. Coverage differs only in where the bytes go: concentrated layers and requests get less, spread ones get more.
@@ -56,8 +54,8 @@ Fixed-k top-k (vegas) is the special case: same signal, uniform k. Coverage diff
 |---|---|
 | KV view | Selected tokens gathered from the paged cache into per-layer page-aligned scratch once per round; later steps append only the newest token. |
 | KV writes | Draft steps write K/V into the one real paged cache at the round's reserved slots; the verify overwrites the same slots. There is exactly one KV cache. |
-| Weights | A separately loaded W4A16 copy of the target on the Marlin path, about 2 GB. The copy holds decoder projections and norms only; the target's attention modules, embeddings and lm_head are grafted in, so KV binding, layer identity and losslessness are untouched. The checkpoint id is part of the compile hash. |
-| Graphs | The draft has its own dispatcher: piecewise-only keys, trimmed to the sizes a draft step can reach, captured in a dedicated pass. Dummy runs outside the capture window run eagerly; propose replays. A key miss degrades to eager. |
+| Weights | A separately loaded W4A16 copy of the target on the Marlin path, about 2 GB. The copy holds decoder projections and norms only; the target's attention modules, embeddings and lm_head are grafted in, so KV binding, layer identity and losslessness are untouched. |
+| Graphs | Piecewise CUDA graphs, captured in the draft's own pass; every draft step replays them. |
 | Logits | The target's own lm_head, shared, bf16. |
 
 ### Verifying
@@ -66,7 +64,7 @@ The unmodified target: full KV, bf16 weights, one forward over g + 1 tokens. Not
 
 ### Configuration
 
-Explicit typed fields on `SpeculativeConfig`. `sparse_attn_algorithm="coverage"` is the method; `"longspec"` adds the static skip masks, an ablation instrument.
+Explicit typed fields on `SpeculativeConfig`. `sparse_attn_algorithm="coverage"` is the method.
 
 | Knob | Field | Value |
 |---|---|---|
@@ -76,20 +74,10 @@ Explicit typed fields on `SpeculativeConfig`. `sparse_attn_algorithm="coverage"`
 | Cap | `sparse_attn_ratio`, fraction of the prefix; 1 means uncapped | 0.15 |
 | g | `num_speculative_tokens` | 6 |
 | Draft weights | `sparse_attn_draft_weights` | `RedHatAI/Qwen3-4B-quantized.w4a16`; AWQ and GPTQ measure the same |
-| Packed verify | `sparse_attn_packed_verify` | on |
-| Skip masks | `sparse_attn_skip_attn_layers`, `sparse_attn_skip_layers` | empty |
 
-### Cost and memory
+### Memory
 
-| Item | Cost per round at 32K, batch 1 |
-|---|---|
-| Scores | one K read per layer per verify, 4.5 ms |
-| Selection | one launch, L x B blocks, 0.5 to 1.0 ms |
-| Gather | the selected tokens once, 0.4 ms |
-| Draft | g x (Marlin weights 3.4 ms + attention over the selected view 1.7 ms + gather and lm_head) |
-| Verify | one dense step of g + 1 queries: attention 31.1, scores 4.5, weights 11.1 ms |
-
-Memory: target weights 8 GB; 4-bit copy 2 GB; KV 0.147 MB per token; score buffer of one bf16 per layer, request and token, 75 MB at 36 layers, 8 requests, 128K; draft table width: cap plus sink, recent and 2g + 1; the scratch is a bounded copy of the selected slots. The KV pool at 0.9 utilization is about 32 GB with the 4-bit copy; one 128K request peaks at 21% of it.
+Beyond dense decoding: the 4-bit copy (about 2 GB), the score buffer (one bf16 per layer, request and token: 75 MB at 128K, batch 8) and the draft scratch, bounded by the cap.
 
 ## Results
 
@@ -105,8 +93,6 @@ Ours: the configuration above. Vegas: the baseline configuration, same stack. ta
 | 64K | 2 | 45.9 | 56.7 (5.84, 0.807) | **73.6** (5.76, 0.795, 6.7%) | 1.60x | 1.30x |
 | 128K | 1 | 23.5 | 19.5 (5.31, 0.724) | 18.9 (4.52, 0.590, 5.9%) | 0.80x | 0.97x |
 
-- Dense reproduces within 2% across passes at 32K and 64K, within 13% at 128K.
-- Vegas acceptance reproduces its paper at 32K (tau 6.1 to 6.3 in every pass); at 64K and 128K it sits 0.5 to 1.6 below the first baseline pass, a YaRN or trajectory effect never pinned down.
 - The gain moves with batch: bytes matter more, and the packed verify wins more.
 
 ### Selection at equal budget
@@ -142,17 +128,16 @@ Selection alone before quantization, packing and draft graphs (bf16 draft, cap 1
 
 ### Quantized drafting
 
-Agreement: bf16 greedy trajectories teacher-forced through a quantized copy, per-token argmax agreement. That is exactly the acceptance condition of a greedy 4-bit drafter under a bf16 verify. tau_sim walks the agreement in blocks of 6. Dense tok/s: the quantized model decoding alone at 32K.
+Agreement: bf16 greedy trajectories teacher-forced through a quantized copy, per-token argmax agreement. That is exactly the acceptance condition of a greedy 4-bit drafter under a bf16 verify. tau_sim walks the agreement in blocks of 6.
 
-| Model | 32K agreement (tau_sim) | 64K agreement (tau_sim) | Dense b1 / b2 / b4 |
-|---|---|---|---|
-| bf16 self | 0.994 (6.81) | 0.984 (6.66) | 48.8 / 72.7 / 94.2 |
-| Qwen AWQ | 0.927 (5.53) | 0.846 (4.28) | 82.0 / 100.8 / 113.9 |
-| RedHat GPTQ W4A16 | 0.928 (5.53) | 0.848 (4.46) | 81.1 / 102.3 / 115.4 |
-| JunHowie GPTQ-Int4 | 0.920 (5.41) | 0.865 (4.51) | 81.1 / 102.4 / 115.0 |
+| Model | 32K agreement (tau_sim) | 64K agreement (tau_sim) |
+|---|---|---|
+| bf16 self | 0.994 (6.81) | 0.984 (6.66) |
+| Qwen AWQ | 0.927 (5.53) | 0.846 (4.28) |
+| RedHat GPTQ W4A16 | 0.928 (5.53) | 0.848 (4.46) |
+| JunHowie GPTQ-Int4 | 0.920 (5.41) | 0.865 (4.51) |
 
 - Quantization alone costs 0.9 tau at 32K and 2.3 at 64K. The loss grows with context; within a generation the late half agrees better than the early half.
-- Marlin: 1.66x on the dense step at batch 1 (the 8 GB of weights shrink, the KV read does not); no crossover through batch 4; at batch 8 bf16 preempts on KV capacity (9 to 11 tok/s at a 98% pool) while the 4-bit copy fits.
 - Draft weights per step 12.4 to 3.4 ms. Sparse view and quantization compose about multiplicatively: alpha 0.93 x 0.90 gives the 0.80 to 0.84 seen at 32K.
 
 Integrated, θ 0.98 cap 15%, same-node pairs:
@@ -165,7 +150,6 @@ Integrated, θ 0.98 cap 15%, same-node pairs:
 | 64K, batch 2 | 56.4 | 65.6 |
 
 - 64K batch 1 tune with the 4-bit draft: θ 0.995 cap 15% gives 39.4, alpha 0.754; θ 0.98 cap 25% gives 38.1, 0.760; θ 0.995 cap 25% gives 35.9, 0.732. A bf16 draft at θ 0.995 cap 25% reaches alpha 0.935, so at 64K the loss is quantization, not the view.
-- Ablation only: the 4-bit draft grafted onto vegas gives 67.7 at 32K batch 1 and 146.7 at batch 4 on its own node pair; the equal-budget table above is the paired comparison.
 
 ### Time per round
 
@@ -180,7 +164,6 @@ GPU ms per round from vLLM's profiler, θ 0.98, steady full-batch rounds. Dense 
 
 - Unpacked, the verify attention costs 4.4x the dense step's attention over the same KV (31.1 vs 7.5 ms at 32K b1): one block per query head, 32 blocks on 84 SMs, no split. The dense step packs the GQA group and splits the KV 17 ways, 136 blocks.
 - Every bf16 forward reads 8 GB of weights in 11.1 to 12.4 ms, 93% of the card's bandwidth. The bf16 draft step sits on that floor.
-- Wall time sits 2 to 15% above GPU busy. Launch overhead is second order once the draft replays graphs.
 
 Packed verify attention. FA2 packs the query heads of one KV head into block rows only at query length 1, so the multi-token verify read the KV once per query head. The verify attention is decomposed instead: a non-causal prefix call with the GQA group reshaped into rows, a causal tail over the last pages, and a log-sum-exp merge that also feeds the score reduction. Static shapes, no host reads, graph safe, gated per call with a kill switch. The prefix launches B x Hk blocks, so the win scales with batch. A/B, θ 0.98, bf16 draft:
 
@@ -204,19 +187,6 @@ Output equals dense greedy decoding token for token: selection alone at θ = 1 u
 | 128K, batch 1 | Below dense: 18.9 at θ 0.926, 21.8 at θ 0.98, dense 23.5. Not memory starvation: zero preemptions, pool at 21%. Suspects: the batch-1 verify occupancy wall and the quantization decay. |
 | 32K, batch 4 | Selection loses 0.09 alpha to vegas at equal bytes, reproduced twice; batch 2 and 3 do not show it. Per-request budget skew under a shared selection pass is the suspect. |
 | Small batches | The packed prefix launches B x Hk blocks; 8 to 16 blocks measure flat. A heuristic split fills the SMs but moved θ = 1 acceptance to 0.946, below the parity gate; parked pending the merge precision. |
-| Blackwell | Engine init hits a kernel with no sm120 image before any model code; the wheel's FA2 is sm80 SASS with PTX. Benchmarks stay on A6000. |
-| Measurement | Greedy trajectories diverge across engine configurations; tau moves by 0.3 on the same prompt. Only same-node paired cells are compared. |
-
-## Lessons
-
-| Lesson | Evidence |
-|---|---|
-| Each lever exposes the next | The sparse view makes the draft weight-bound; 4-bit weights make it launch-bound; graphs make it GPU-bound again. |
-| The draft's bottleneck is not the KV | 12.4 of 15.3 ms per bf16 step are weights; the selected view costs 1.8. |
-| Bytes do not explain the verify | Unpacked it reads the KV four times at 38% occupancy; packing fixes it where blocks suffice. |
-| θ is a plateau | 0.92 and 0.98 accept alike; 0.92 halves the bytes and shortens the round. |
-| Quantization loss grows with context | Agreement 0.93 at 32K, 0.85 at 64K; the 64K deficit is quantization, not selection. |
-| Acceptance is trajectory noise across configs | Pair cells on one node; compare ratios within pairs. |
 
 ## Next
 
@@ -247,5 +217,3 @@ Fixed g drafts through positions the drafter has already given up on. The expect
 - One KV cache. Every extra structure is a bounded copy or an index over it.
 - Lossless by construction: emitted tokens are the verify's argmax; the draft moves speed only.
 - Graph safe: selection, gather, slot conversion and the draft forward use static shapes and no host reads; anything data-dependent is frozen per round at table-build time.
-- Layer identity is call order: every draft step issues exactly one attention call per layer, or advances the counter explicitly when a layer is skipped.
-- The drafter shares by reference everything that defines the model: attention modules, KV cache, embeddings, lm_head, sampler. It owns only cheap replacements: quantized projections, its scratch, its graphs.
