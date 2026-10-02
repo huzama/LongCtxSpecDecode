@@ -2,6 +2,22 @@
 
 Guidance for Claude Code in this repository.
 
+## Direction
+
+The user directs. Claude follows.
+
+- Do nothing that was not asked for. No extra files, no refactors, no runs, no
+  commits, no pushes, no cleanup beyond the request.
+- One request, one scope. Finish it, report, stop. Never carry work forward on
+  your own initiative.
+- Recommend only when asked, or when the user needs to hear it. Not by
+  default. The decision is the user's.
+- Scope is this repository. The thesis sets the path; thesis files, chapters
+  and schedule stay out of answers unless the user brings them in.
+- Ask before anything irreversible or outward-facing.
+- Auto memory stays off. Claude never writes to a memory store. Project
+  knowledge lives in `notes/` and nowhere else.
+
 ## Project
 
 This repository is the Vegas vLLM fork (github.com/platformxlab/vegas, remote `upstream`) plus `notes/`. Read `notes/TODO.md` first; it is the working contract. `notes/DrafterGoesBurrrr.md` is the method with its results. `notes/literature.yaml` is the surveyed literature. Branch `survey-and-prototypes` is an archive: read, never edit.
