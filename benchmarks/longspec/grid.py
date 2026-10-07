@@ -530,6 +530,18 @@ def _cache_capacity(worker):
     }
 
 
+def _round_graph_stats(worker):
+    drafter = getattr(worker.model_runner, "drafter", None)
+    graphs = getattr(drafter, "round_graphs", None)
+    if graphs is None:
+        return None
+    return {
+        "batches": sorted(graphs.graphs),
+        "verify": graphs.verify_replays,
+        "draft": graphs.draft_replays,
+    }
+
+
 def load_tokens(path):
     payload = json.loads(Path(path).read_text())
     return payload["tokens"] if isinstance(payload, dict) else payload
@@ -657,6 +669,7 @@ def measure(llm, args, prompts, factor, slot) -> tuple[dict, list]:
         )
     if args.mode == "coverage":
         llm.collective_rpc(_overrider_reset)
+    graph_before = llm.collective_rpc(_round_graph_stats)[0] if spec else None
     if args.measurement == "batch":
         elapsed, outputs, timing, counters = generate_batch(
             llm, prompts, args.gen, args.spec_tokens, spec
@@ -714,6 +727,14 @@ def measure(llm, args, prompts, factor, slot) -> tuple[dict, list]:
                 ],
             }
         )
+    if graph_before is not None:
+        graph_after = llm.collective_rpc(_round_graph_stats)[0]
+        record["round_graphs"] = {
+            "captured_batches": graph_after["batches"],
+            "verify_replays": graph_after["verify"] - graph_before["verify"],
+            "draft_replays": graph_after["draft"] - graph_before["draft"],
+            "window": "whole_generation",
+        }
     if budget is not None:
         record["budget"] = budget
         record["budget_window"] = "whole_generation"

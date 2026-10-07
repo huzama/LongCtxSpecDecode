@@ -156,8 +156,8 @@ from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
-from vllm.v1.spec_decode.sparse_attn import SparseAttnProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.sparse_attn import SparseAttnProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
@@ -710,6 +710,7 @@ class GPUModelRunner(
 
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
+        self._sparse_graph_sampler_output: SamplerOutput | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
         self.layerwise_nvtx_hooks_registered = False
@@ -2862,6 +2863,10 @@ class GPUModelRunner(
         logits: torch.Tensor | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> SamplerOutput:
+        if self._sparse_graph_sampler_output is not None:
+            output = self._sparse_graph_sampler_output
+            self._sparse_graph_sampler_output = None
+            return output
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
         # Update output token ids with tokens sampled in last step
@@ -3331,6 +3336,13 @@ class GPUModelRunner(
                 "after execute_model() returns None."
             )
 
+        if (
+            self.speculative_config is not None
+            and isinstance(self.drafter, SparseAttnProposer)
+            and self.drafter.round_graphs is not None
+        ):
+            self.drafter.round_graphs.pending_batch = None
+
         if self.vllm_config.model_config.enable_return_routed_experts:
             capturer = RoutedExpertsCapturer.get_instance()
             if capturer is not None:
@@ -3546,13 +3558,38 @@ class GPUModelRunner(
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
-            model_output = self._model_forward(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-                **model_kwargs,
-            )
+            captured = None
+            if (
+                self.speculative_config is not None
+                and isinstance(self.drafter, SparseAttnProposer)
+                and self.drafter.round_graphs is not None
+                and cudagraph_mode == CUDAGraphMode.FULL
+                and input_ids is not None
+                and inputs_embeds is None
+                and not self.num_prompt_logprobs
+                and not self.discard_request_mask.np[: self.input_batch.num_reqs].any()
+                and not envs.VLLM_COMPUTE_NANS_IN_LOGITS
+                and not any(
+                    self.requests[req_id].sampling_params.structured_outputs is not None
+                    for req_id in self.input_batch.req_ids
+                )
+            ):
+                captured = self.drafter.round_graphs.verify(
+                    input_ids,
+                    spec_decode_common_attn_metadata,
+                    spec_decode_metadata,
+                    self.input_batch.sampling_metadata,
+                )
+            if captured is not None:
+                model_output, self._sparse_graph_sampler_output = captured
+            else:
+                model_output = self._model_forward(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    **model_kwargs,
+                )
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -3581,8 +3618,14 @@ class GPUModelRunner(
                         kv_connector_output,
                     )
 
-                sample_hidden_states = hidden_states[logits_indices]
-                logits = self.model.compute_logits(sample_hidden_states)
+                if self._sparse_graph_sampler_output is not None:
+                    # Uniform greedy verification already projected and sampled
+                    # every row inside its graph. No logits leave that graph.
+                    sample_hidden_states = hidden_states
+                    logits = None
+                else:
+                    sample_hidden_states = hidden_states[logits_indices]
+                    logits = self.model.compute_logits(sample_hidden_states)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -4008,6 +4051,16 @@ class GPUModelRunner(
             )
         elif spec_config.method == "sparse_attn":
             assert isinstance(self.drafter, SparseAttnProposer)
+
+            graphs = self.drafter.round_graphs
+            if graphs is not None:
+                batch = self.input_batch.num_reqs
+                captured = graphs.draft_after_verify(batch)
+                if captured is not None:
+                    self._copy_valid_sampled_token_count(
+                        graphs.next_ids[:batch], graphs.valid_counts[:batch]
+                    )
+                    return captured
 
             # TODO: Check whether need to support disable_padded_drafter_batch
             assert not self.speculative_config.disable_padded_drafter_batch
@@ -5331,7 +5384,7 @@ class GPUModelRunner(
         return cuda_graph_size
 
     def _capture_drafter_cudagraphs(self) -> None:
-        """Capture the drafter's piecewise graphs over its own key set.
+        """Capture fallback model pieces, then complete greedy round graphs.
 
         The drafter dispatches draft-step sizes (one token per request)
         from its own dispatcher; the main capture loops only exercise the
@@ -5357,6 +5410,8 @@ class GPUModelRunner(
             self.drafter.dummy_run(
                 num_tokens, use_cudagraphs=True, is_graph_capturing=True
             )
+        if self.drafter.round_graphs is not None:
+            self.drafter.round_graphs.capture()
 
     def _capture_cudagraphs(
         self,

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -91,6 +92,8 @@ class SparseAttnProposer:
         self.speculative_config = vllm_config.speculative_config
 
         self.runner = runner
+        self.round_graphs = None
+        self._capturing_round = False
         self.device = device
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
@@ -164,6 +167,8 @@ class SparseAttnProposer:
         return self._sampled_token_ids[: self.batch_size]
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
+        if self.round_graphs is not None:
+            self.round_graphs.enabled = cudagraph_mode.has_full_cudagraphs()
         # This should be called BEFORE adjust_cudagraph_sizes_for_spec_decode.
         # The drafter calls the inner model, which carries only piecewise
         # wrappers; a FULL dispatch mismatches every wrapper's runtime mode
@@ -282,8 +287,15 @@ class SparseAttnProposer:
     def _exit_propose(self):
         self.attn_overrider.exit_propose()
 
+    def propose(self, **kwargs):
+        if self.round_graphs is not None:
+            tokens = self.round_graphs.draft(**kwargs)
+            if tokens is not None:
+                return tokens
+        return self._propose(**kwargs)
+
     @_method_wrapper(enter_fn=_enter_propose, exit_fn=_exit_propose)
-    def propose(
+    def _propose(
         self,
         # [batch_size]
         next_token_ids: torch.Tensor,
@@ -356,6 +368,8 @@ class SparseAttnProposer:
         attn_metadata = attn_metadata_builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0
         )
+        if self._capturing_round:
+            attn_metadata.max_num_splits = 1
         assert isinstance(attn_metadata, self.allowed_attn_types), (
             f"Attention metadata type {type(attn_metadata)} not supported. "
             f"Supported types: {self.allowed_attn_types}"
@@ -610,6 +624,8 @@ class SparseAttnProposer:
         # use, which is the first verified round with non-uniform draft
         # counts (batch >= 2, mid-decode). Build it here instead.
         _get_gather_cuda_module()
+        if SparseAttnRoundGraphs.supported(self):
+            self.round_graphs = SparseAttnRoundGraphs(self, target_model)
 
     @torch.inference_mode()
     @_method_wrapper(enter_fn=_enter_propose, exit_fn=_exit_propose)
@@ -700,6 +716,10 @@ class SparseAttnProposer:
         num_tokens: int,
         use_cudagraphs: bool = True,
     ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
+        if self._capturing_round:
+            # The outer graph records all kernels, including attention and
+            # sampling. Do not replay nested piecewise model graphs here.
+            return CUDAGraphMode.NONE, num_tokens, None
         cudagraph_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
             num_tokens=num_tokens, uniform_decode=True
         )
@@ -736,3 +756,327 @@ class SparseAttnProposer:
                 num_tokens_across_dp[dp_rank] = num_tokens_padded
 
         return cudagraph_mode, num_tokens_padded, num_tokens_across_dp
+
+
+def plain_greedy(metadata: SamplingMetadata) -> bool:
+    """Only capture sampling whose behavior is independent of request-side state."""
+    from vllm.v1.sample.logits_processor.builtin import (
+        LogitBiasLogitsProcessor,
+        MinTokensLogitsProcessor,
+    )
+
+    if (
+        not metadata.all_greedy
+        or not metadata.no_penalties
+        or metadata.max_num_logprobs is not None
+        or metadata.allowed_token_ids_mask is not None
+        or metadata.bad_words_token_ids
+    ):
+        return False
+    for processor in metadata.logitsprocs.non_argmax_invariant:
+        if type(processor) is LogitBiasLogitsProcessor and not processor.biases:
+            continue
+        if type(processor) is MinTokensLogitsProcessor and not processor.min_toks:
+            continue
+        return False
+    return True
+
+
+class SparseAttnRoundGraphs:
+    """Two complete graphs for plain greedy Qwen3 decode on one FA2 GPU.
+
+    Reuse the proposer and rejection sampler. Inputs/outputs live outside the
+    graph pool, so replaying the draft cannot overwrite verification results.
+    Exact captured batch sizes need no fictitious requests or padding writes.
+    Other shapes and sampling options use the existing execution path.
+    """
+
+    @staticmethod
+    def supported(proposer) -> bool:
+        from .longspec.portable.kernel_support import flash_attn_version
+
+        config = proposer.vllm_config
+        parallel = config.parallel_config
+        return (
+            config.model_config.hf_config.model_type == "qwen3"
+            and not config.model_config.enforce_eager
+            and proposer.max_model_len >= 2 * proposer.num_speculative_tokens + 1
+            and not config.speculative_config.enforce_eager
+            and config.speculative_config.sparse_attn_algorithm in ("coverage", "vegas")
+            and parallel.tensor_parallel_size == 1
+            and parallel.pipeline_parallel_size == 1
+            and parallel.data_parallel_size == 1
+            and parallel.decode_context_parallel_size == 1
+            and getattr(parallel, "prefill_context_parallel_size", 1) == 1
+            and config.lora_config is None
+            and config.kv_transfer_config is None
+            and not config.scheduler_config.async_scheduling
+            and flash_attn_version() == 2
+        )
+
+    def __init__(self, proposer, target):
+        self.proposer, self.target = proposer, target
+        self.enabled = False
+        self.graphs = {}
+        config = proposer.vllm_config
+        self.batch_limit = min(
+            config.scheduler_config.max_num_seqs,
+            config.scheduler_config.max_num_batched_tokens
+            // (proposer.num_speculative_tokens + 1),
+        )
+        batch, width = self.batch_limit, proposer.num_speculative_tokens + 1
+        device = proposer.device
+        # Allocated at model load so memory profiling includes these buffers.
+        self.ids = torch.zeros(
+            batch * width, dtype=proposer.runner.input_ids.gpu.dtype, device=device
+        )
+        self.next_ids = torch.zeros(batch, dtype=torch.int32, device=device)
+        self.seq_lens = torch.zeros(batch, dtype=torch.int32, device=device)
+        self.rejected = torch.zeros_like(self.seq_lens)
+        blocks = (
+            proposer.max_model_len + proposer.block_size - 1
+        ) // proposer.block_size
+        self.block_table = torch.zeros(batch, blocks, dtype=torch.int32, device=device)
+        self.slots = torch.zeros(batch * width, dtype=torch.int64, device=device)
+        self.hidden = torch.zeros(
+            batch * width, proposer.hidden_size, dtype=proposer.dtype, device=device
+        )
+        self.sampled = torch.zeros(batch, width, dtype=torch.int32, device=device)
+        self.valid_counts = torch.zeros(batch, dtype=torch.int32, device=device)
+        self.token_indices = torch.zeros_like(self.valid_counts)
+        self.discard_mask = torch.zeros(batch, dtype=torch.bool, device=device)
+        self.pending_batch = None
+        self.verify_replays = self.draft_replays = 0
+
+    @torch.inference_mode()
+    def capture(self):
+        from vllm.platforms import current_platform
+
+        if not self.enabled:
+            return
+        p = self.proposer
+        sizes = set(p.vllm_config.compilation_config.cudagraph_capture_sizes or [])
+        sizes = {b for b in sizes if 0 < b <= self.batch_limit}
+        if self.batch_limit:
+            sizes.add(self.batch_limit)
+        pool = current_platform.get_global_graph_pool()
+        for batch in sorted(sizes, reverse=True):
+            self._capture_batch(batch, pool)
+        logger.info(
+            "Captured complete sparse-attention verify/draft graphs for batches %s",
+            sorted(self.graphs),
+        )
+
+    def _capture_batch(self, batch, pool):
+        from vllm.utils.torch_utils import current_stream
+        from vllm.v1.sample.logits_processor import LogitsProcessors
+
+        p = self.proposer
+        width = p.num_speculative_tokens + 1
+        tokens = batch * width
+        query_cpu = torch.arange(batch + 1, dtype=torch.int32)
+        common = CommonAttentionMetadata(
+            query_start_loc=query_cpu.to(p.device),
+            query_start_loc_cpu=query_cpu,
+            seq_lens=self.seq_lens[:batch],
+            num_reqs=batch,
+            num_actual_tokens=batch,
+            max_query_len=1,
+            max_seq_len=p.max_model_len,
+            block_table_tensor=self.block_table[:batch],
+            slot_mapping=self.slots[:batch],
+        )
+        empty = torch.empty(0, device=p.device)
+        sampling = SamplingMetadata(
+            temperature=None,
+            all_greedy=True,
+            all_random=False,
+            top_p=None,
+            top_k=None,
+            generators={},
+            max_num_logprobs=None,
+            no_penalties=True,
+            prompt_token_ids=None,
+            frequency_penalties=empty,
+            presence_penalties=empty,
+            repetition_penalties=empty,
+            output_token_ids=[[] for _ in range(batch)],
+            allowed_token_ids_mask=None,
+            bad_words_token_ids={},
+            logitsprocs=LogitsProcessors(),
+        )
+        query = torch.arange(0, tokens + 1, width, dtype=torch.int32, device=p.device)
+        attention = FlashAttentionMetadata(
+            num_actual_tokens=tokens,
+            max_query_len=width,
+            query_start_loc=query,
+            max_seq_len=p.max_model_len,
+            seq_lens=self.seq_lens[:batch],
+            block_table=self.block_table[:batch],
+            slot_mapping=self.slots[:tokens],
+            use_cascade=False,
+            common_prefix_len=0,
+            cu_prefix_query_lens=None,
+            prefix_kv_lens=None,
+            suffix_kv_lens=None,
+            max_num_splits=1,
+        )
+        indices = torch.arange(tokens, dtype=torch.int32, device=p.device).view(
+            batch, width
+        )
+        spec = SpecDecodeMetadata(
+            draft_token_ids=torch.empty(
+                batch * (width - 1), dtype=torch.int32, device=p.device
+            ),
+            num_draft_tokens=[width - 1] * batch,
+            cu_num_draft_tokens=query[1:]
+            - torch.arange(1, batch + 1, device=p.device, dtype=torch.int32),
+            cu_num_sampled_tokens=query[1:],
+            target_logits_indices=indices[:, :-1].flatten(),
+            bonus_logits_indices=indices[:, -1].contiguous(),
+            logits_indices=indices.flatten(),
+        )
+        per_layer = dict.fromkeys(p.attn_layer_names, attention)
+        slots = dict.fromkeys(p.attn_layer_names, self.slots[:tokens])
+        offsets = torch.arange(width, device=p.device)
+
+        def verify():
+            positions = (self.seq_lens[:batch, None] - width + offsets).flatten()
+            pages = torch.div(positions, p.block_size, rounding_mode="floor").view(
+                batch, width
+            )
+            self.slots[:tokens].copy_(
+                (
+                    self.block_table[:batch].gather(1, pages) * p.block_size
+                    + positions.view(batch, width) % p.block_size
+                ).flatten()
+            )
+            with set_forward_context(
+                per_layer,
+                p.vllm_config,
+                num_tokens=tokens,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                slot_mapping=slots,
+            ):
+                hidden = self.target(input_ids=self.ids[:tokens], positions=positions)
+            self.hidden[:tokens].copy_(hidden)
+            logits = self.target.compute_logits(hidden)
+            spec.draft_token_ids.copy_(
+                self.ids[:tokens].view(batch, width)[:, 1:].flatten()
+            )
+            output = p.runner.rejection_sampler(spec, None, logits, sampling)
+            self.sampled[:batch].copy_(output.sampled_token_ids)
+            # Keep the verifier-to-drafter handoff on the GPU. All requests in
+            # this uniform decode path have a valid next token (no prefill).
+            eagle_prepare_next_token_padded_kernel[(batch,)](
+                self.sampled,
+                self.discard_mask,
+                self.next_ids,
+                self.next_ids,
+                self.valid_counts,
+                p.runner.input_batch.vocab_size,
+                width,
+                batch,
+                self.sampled.stride(0),
+                BLOCK_SIZE_TOKENS=triton.next_power_of_2(width),
+            )
+            eagle_prepare_inputs_padded_kernel[(batch,)](
+                spec.cu_num_draft_tokens,
+                self.valid_counts,
+                query,
+                self.token_indices,
+                self.rejected,
+                batch,
+            )
+
+        def draft():
+            p._capturing_round = True
+            try:
+                p._propose(
+                    next_token_ids=self.next_ids[:batch],
+                    token_indices_to_sample=None,
+                    common_attn_metadata=replace(common),
+                    sampling_metadata=sampling,
+                    num_rejected_tokens_gpu=self.rejected[:batch],
+                )
+            finally:
+                p._capturing_round = False
+
+        self.seq_lens.fill_(width)
+        self.ids.zero_()
+        self.next_ids.zero_()
+        self.rejected.zero_()
+        warmups = max(1, p.vllm_config.compilation_config.cudagraph_num_of_warmups)
+        for _ in range(warmups):
+            verify()
+        verify_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(verify_graph, pool=pool, stream=current_stream()):
+            verify()
+        for _ in range(warmups):
+            verify_graph.replay()  # restore logical selection before each draft
+            draft()
+        verify_graph.replay()
+        draft_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(draft_graph, pool=pool, stream=current_stream()):
+            draft()
+        # These constants were allocated outside the capture pool. Retain
+        # them for as long as the graph nodes hold their device addresses.
+        constants = (common, attention, spec, sampling, offsets)
+        self.graphs[batch] = (verify_graph, draft_graph, constants)
+
+    def _copy_context(self, common, batch):
+        self.seq_lens[:batch].copy_(common.seq_lens[:batch])
+        source = common.block_table_tensor[:batch]
+        if source.shape[1] > self.block_table.shape[1]:
+            source = source[:, : self.block_table.shape[1]]
+        self.block_table[:batch, : source.shape[1]].copy_(source)
+
+    def verify(self, input_ids, common, spec, sampling):
+        self.pending_batch = None
+        if common is None or spec is None or not plain_greedy(sampling):
+            return None
+        batch = len(spec.num_draft_tokens)
+        width = self.proposer.num_speculative_tokens + 1
+        if (
+            batch not in self.graphs
+            or common.num_actual_tokens != batch * width
+            or any(n != width - 1 for n in spec.num_draft_tokens)
+        ):
+            return None
+        self.ids[: batch * width].copy_(input_ids[: batch * width])
+        self._copy_context(common, batch)
+        self.graphs[batch][0].replay()
+        self.verify_replays += 1
+        self.pending_batch = batch
+        return self.hidden[: batch * width], SamplerOutput(self.sampled[:batch], None)
+
+    def draft_after_verify(self, batch):
+        if self.pending_batch != batch:
+            return None
+        self.pending_batch = None
+        self.graphs[batch][1].replay()
+        self.draft_replays += 1
+        self.proposer.batch_size = batch
+        return self.proposer.sampled_token_ids
+
+    def draft(
+        self,
+        next_token_ids,
+        common_attn_metadata,
+        sampling_metadata,
+        num_rejected_tokens_gpu=None,
+        **kwargs,
+    ):
+        batch = common_attn_metadata.num_reqs
+        if batch not in self.graphs or not plain_greedy(sampling_metadata):
+            return None
+        self.next_ids[:batch].copy_(next_token_ids[:batch])
+        self._copy_context(common_attn_metadata, batch)
+        if num_rejected_tokens_gpu is None:
+            self.rejected[:batch].zero_()
+        else:
+            self.rejected[:batch].copy_(num_rejected_tokens_gpu[:batch])
+        self.graphs[batch][1].replay()
+        self.draft_replays += 1
+        self.proposer.batch_size = batch
+        return self.proposer.sampled_token_ids

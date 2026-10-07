@@ -91,5 +91,8 @@ def test_dense_output(tmp_path, model, checkpoint, ctx, theta, cap, min_alpha):
     assert all(r["decode_seconds"] > 0 and r["decode_tok_s"] > 0 for r in records)
     spec = next(r for r in records if r["mode"] == "coverage")
     assert spec["alpha"] >= min_alpha, spec
+    assert 2 in spec["round_graphs"]["captured_batches"], spec
+    assert spec["round_graphs"]["verify_replays"] > 0, spec
+    assert spec["round_graphs"]["draft_replays"] > 0, spec
     comparison = json.loads((tmp_path / "output_comparison.json").read_text())
     assert comparison[f"{ctx}:2:coverage"]["identical"], comparison
