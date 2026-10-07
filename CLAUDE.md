@@ -20,7 +20,7 @@ The user directs. Claude follows.
 
 ## Project
 
-This repository is the Vegas vLLM fork (github.com/platformxlab/vegas, remote `upstream`) plus `notes/`. Read `notes/TODO.md` first; it is the working contract. `notes/Method.md` is the method. `notes/literature.yaml` is the surveyed literature. Branch `survey-and-prototypes` is an archive: read, never edit.
+This repository is the Vegas vLLM fork (github.com/platformxlab/vegas, remote `upstream`) plus `notes/`. Read `notes/experiments.md` first; it is the working contract. `notes/Method.md` is the method. `notes/literature.yaml` is the surveyed literature. Branch `survey-and-prototypes` is an archive: read, never edit.
 
 ## Environment
 
@@ -46,7 +46,7 @@ srun -p srv0X --gres=gpu:1 --cpus-per-task=8 --mem=64G -t 4:00:00 --chdir=$REPO 
 ## Conventions
 
 - Timeless naming everywhere: files, symbols, and headings by topic, never by date or version. Run outputs are the one exception and carry a slug plus timestamp; never reference a timestamped path from committed text.
-- `notes/TODO.md` keeps its shape: goals first, then decisions and measurements with qualifiers, then next. `notes/literature.yaml` is hand-maintained; append findings, never renumber IDs.
+- `notes/experiments.md` holds the agreed experiment setup and result tables. Keep pending cells empty; run experiments only when the user instructs. `notes/literature.yaml` is hand-maintained; append findings, never renumber IDs.
 - Notes and messages: TL;DR first, decisions before evidence, tables for enumerable content, prose only for argument. Short sentences. No em dashes. No filler.
 
 ## Git

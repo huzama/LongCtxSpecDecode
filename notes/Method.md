@@ -1,84 +1,66 @@
 # Method
 
-Self-speculative decoding at long context, on the Vegas vLLM fork. The model drafts its own next tokens from part of its KV cache, then checks them against the whole cache. The KV cache stores the attention keys and values for past tokens.
+Self-speculative decoding at long context: a 4-bit copy drafts from selected
+KV-cache tokens; the BF16 target verifies against the whole cache.
 
 ## Our method
 
 | Part | Rule |
 |---|---|
-| Draft | A copy of the model with 4-bit weights and 16-bit activations (W4A16). Drafts 6 tokens per round. |
-| What the draft reads | In each layer, keep the first 4 and last 64 tokens, then add the highest-weight past tokens until their combined attention mass reaches 85%. The additional selection is capped at 15% of the cache. |
-| Where the weights come from | The previous verify pass: its first and last new token, averaged over heads. Updated every round, per layer and per request. |
-| Verify | The full-precision model reads the whole cache and checks all 6 drafted tokens in one pass. It keeps them up to the first disagreement, then adds its own token. |
-| Output | Full-cache target verification. Different batch sizes or numbers of tokens processed together can change floating-point results and the highest-scoring token. |
+| Draft | Same model with 4-bit weights and 16-bit activations (W4A16). Draft 6 tokens per round. |
+| Selection | Per layer and request, keep the first 4 and last 64 tokens. Add the highest-attention tokens to reach 85% attention mass, with the additional selection capped at 15% of the cache. |
+| Attention scores | From the previous target verification: average its first and last new token's attention over heads. Update every round. |
+| Verify | The BF16 target checks the drafts against the whole cache. Accept the matching prefix, then emit one target token. |
+| Memory | Retain the target's full KV cache. The extra W4 weights and draft buffers consume GPU memory and can reduce the batch that fits. |
 
-## Proposed: sparse verify
+Full-cache verification preserves the target's greedy decoding rule. Different
+batch shapes can still change floating-point results and token choices. Check
+agreement by rescoring the same text prefixes with dense attention, reporting
+ties for the highest score separately.
 
-| Part | Rule |
+Experiment setup, batch selection, baselines, and result tables are in
+[experiments.md](experiments.md).
+
+### TODO next: sparse verification
+
+Planned extension of our method; not yet implemented. Verify against a larger
+cache selection than the draft uses. Accept only when the score gap between the top two choices exceeds a
+threshold; otherwise use full-cache verification. Refresh the selection with
+periodic full-cache passes. The selection size, score threshold, and refresh
+interval remain undecided. Sparse verification can change target outputs and requires
+measuring disagreements against dense attention.
+
+## Technical details
+
+Current A6000 implementation (FlashAttention 2):
+
+| What | How |
 |---|---|
-| What the verify reads | Select cached tokens to reach a higher cumulative attention weight, for example p = 0.99, keeping more tokens than the draft. Always includes the draft's tokens. |
-| Confidence check | A drafted token is accepted only if the sparse verify picks the same token and the score difference between its top two choices exceeds a threshold, still to be chosen. At the first token that fails, a full-cache verify takes over. |
-| Refresh | A full-cache verify periodically rescans the whole cache to update the selection. The number of rounds between scans is still to be chosen. |
-| Output | Not guaranteed equal to dense. Measured as wrong tokens per 1000. |
+| Load the draft | Load the matching W4A16 checkpoint. Share the target's embeddings, output head, and attention modules; retain separate draft projections and norms. |
+| Multiply quantized weights | Marlin reads packed weights and reconstructs approximate BF16 values in registers using scales and zero points. BF16 multiplies accumulate in FP32 within the same kernel; no full BF16 draft-weight copy is stored. |
+| Obtain attention scores | A Triton kernel rereads cached keys, computes the selected verification queries' dot products, and normalizes with FlashAttention's log-sum-exp. Reduce over queries and heads into one BF16 score per cached token. |
+| Select cache entries | One CUDA block per layer/request finds the score threshold by radix selection. Reserved tokens count toward the 85% mass target; the 15% additional-token cap can prevent reaching it. Convert selected token indices to physical KV slots. |
+| Read KV during drafting | Gather selected target KV and the new tail into per-layer BF16 buffers on the first draft step. Later steps append only the newest KV entry. Keep original token positions for rotary embeddings. |
+| Verify and discard rejected drafts | The target recomputes the draft positions with full-cache attention, replacing their temporary draft KV. Accept the matching prefix; shorten the valid sequence length to exclude rejected positions. |
+| CUDA graphs | Replay one verifier graph (forward, logits, acceptance, cache selection, next-input preparation), then one graph containing all 6 draft steps and sampling. The first draft gathers the selected KV; later drafts append inside the same graph. No CPU token readback between drafts. |
+| Account for memory | Allocate draft buffers before vLLM sizes the target KV pool, so the extra weights and buffers reduce available cache capacity. |
 
-How we check agreement with dense:
+Each draft step generates all 6 proposed tokens with **one CUDA graph launch**.
+Each verification step checks those tokens with **one CUDA graph launch**.
+A complete round contains one step of each kind.
 
-| Step | Decides |
-|---|---|
-| 1. A full-precision draft uses the proposed sparse-verification KV selection and is checked using the whole cache. No new code. | The smallest attention-mass target p that meets the allowed disagreement rate; that rate is still to be chosen |
-| 2. Log the score difference between the top two choices at each disagreement with dense. | The minimum score difference required to accept a token |
-| 3. Run the full method and check every output token against dense. | The final wrong tokens per 1000 |
-
-## Evaluation
-
-| Item | Choice |
-|---|---|
-| Dataset | LongBench v2 only: the official chain-of-thought prompt in the chat template, the document cut in the middle to exactly the context length |
-| Models | Qwen3-4B, Qwen3-8B |
-| Contexts | 32K, 64K, 128K. YaRN beyond 40K. |
-| Batch | 1, with 8 questions per model and context length |
-| Generation | Stop at the end-of-sequence token (EOS), capped at 512 tokens. An answer cut off during reasoning can be used to measure speed, but not final-answer accuracy. |
-| Baselines | Dense decoding. Vegas: fixed 7% of the cache, full-precision draft. |
-| Speed | First-to-last-token time in one generation, against dense and Vegas. Draft, verify and round time from profiling. |
-| Acceptance | Accepted drafted tokens / drafted tokens |
-| Sparse verify quality | Wrong tokens per 1000 against dense |
-| Rules | One A6000. Every comparison on one node. Benchmark configurations run one after another. |
+This applies to greedy Qwen3 runs on one GPU using FlashAttention 2, for batch
+sizes captured at startup and requests with all 6 drafts available to verify.
+Other configurations use the existing execution path. The CPU still prepares
+inputs, schedules requests, and receives outputs. GPU validation is pending.
 
 ## What we tried and dropped
 
-Some ideas were tested and rejected. Others were dropped without a measured
-result. Removing their code does not mean they failed a test.
-
-| Approach | Status | What we measured or know |
-|---|---|---|
-| Activation sparsity: zero small activations to skip weight reads | Tested, rejected; experimental code removed | Qwen3-4B at 32K on A100: With TEAL-style sparsity at 50% / 70%, next-token agreement was 89.26% / 74.02%, against 99.41% for the dense control. All models were given the same text prefixes. Batch-1 forward steps took 8.70 / 7.69 ms, against 10.09 ms for the unmodified dense model. These tests measured prediction agreement and forward-step time separately. They did not measure the speed of a complete speculative decoding run. |
-| Static whole-layer and attention skipping | Implemented, then dropped; code removed | The records checked so far do not show whether these changes improved speed. Removing them does not establish that they failed. |
-| Early exit, draft trees, copy drafting, dynamic draft length and budget-driven attention skipping | No longer planned | No test result is documented here. The older method document listed the last two as future work. |
-| FlashAttention's automatic KV split for packed verification | Tested; further work deferred | On Qwen3-0.6B with the whole cache selected, recorded acceptance fell from above 0.98 to 0.946, below the required acceptance rate of 0.98. Other ways to split the KV calculation remain untested. |
-
-The activation-sparsity agreement test used four prompts with 256 tokens after
-each prompt. Sparsity was applied only to those later tokens. This agreement
-measurement is separate from acceptance during speculative decoding. Saved results
-are in directories whose names start with `actsparse` under `outputs/runs/`. The split trial and former proposals are recorded in Git history
-for `notes/handoff.md` and `notes/DrafterGoesBurrrr.md`. These historical results
-are not final LongBench v2 evaluation results.
-
-## Code
-
-| Piece | Where |
+| Approach | Outcome |
 |---|---|
-| Selection and draft attention | `vllm/v1/spec_decode/sparse_attn/longspec/overrider.py`, `longspec/kernels/mass_select.py` |
-| Attention weights from the verify | `longspec/portable/score_collection.py`, `longspec/kernels/c2q_scores.py` |
-| Verify attention | `longspec/verify_attention.py` |
-| 4-bit draft copy | `vllm/v1/spec_decode/sparse_attn/draft_weights.py` |
-| Settings | `sparse_attn_*` in `vllm/config/speculative.py` |
-| Runner | `benchmarks/longspec/grid.py` |
-| Time per round | `benchmarks/longspec/round_phases.py` |
-| Agreement | `benchmarks/longspec/w4_agreement.py` |
+| Activation sparsity | Rejected. At 50% / 70% sparsity, same-prefix agreement was 89.26% / 74.02%, versus dense 99.41% (Qwen3-4B, 32K, A100). |
+| Static layer and attention skipping | Code removed; no measured speed benefit recorded. |
+| Early exit, draft trees, copy drafting, dynamic draft length, budget-driven attention skipping | Plans dropped; no recorded results. |
+| FlashAttention automatic KV splitting | Deferred. Qwen3-0.6B full-cache verification: acceptance 0.946, below the required 0.98. |
 
-Draft buffers are allocated during model loading so their memory is counted before
-space is reserved for the KV cache. Tests with fixed synthetic token sequences check
-for identical output; LongBench runs report where outputs differ. Dense rescoring
-compares next-token predictions on the same text prefixes, rebuilding the dense
-model's KV cache. It reports ties for the highest score separately and gives lower
-and upper disagreement counts per 1000 tokens, depending on how ties are counted.
+Historical checks, not final LongBench results.

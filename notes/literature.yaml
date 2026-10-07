@@ -10,7 +10,7 @@
 # Read the family verdicts first; pull individual papers only when an idea or
 # experiment needs them.
 # Research ideas and local results below are historical survey notes.
-# Method.md and TODO.md state the current method and planned work.
+# Method.md and experiments.md state the current method and planned work.
 # Schema labels: kill_test = test used to decide whether to keep an idea;
 # kill = reason to reject it; salvage = part worth keeping; hedge = response
 # to a risk. Keep these keys and the numbered IDs stable.
