@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Where a decode round spends its time: verify, sample, draft, idle.
 
 Runs one cell of the grid under vLLM's torch profiler and reduces the trace
@@ -8,7 +9,7 @@ enabled by ``VLLM_CUSTOM_SCOPES_FOR_PROFILING``) and one scope of ours
 around the drafter's sampler. Kernels are attributed to the scope whose CPU
 range launched them (correlation id), falling back to launch time.
 
-    round_phases.py --ctx 32768 --batch 1 --mode coverage --theta 0.98 ...
+    round_phases.py --ctx 32768 --batch 1 --mode coverage --out outputs/runs/<run>
     round_phases.py --trace outputs/<run>/trace/<file>.pt.trace.json.gz
 
 Grid arguments are ``grid.py``'s. Reports go to the run directory as JSON
@@ -19,11 +20,12 @@ import argparse
 import gzip
 import json
 import os
-import re
 import sys
 import traceback
 from collections import defaultdict
 from pathlib import Path
+
+import regex as re
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import grid  # noqa: E402
@@ -33,26 +35,40 @@ STEP_SCOPE = "gpu_model_runner: preprocess"
 FORWARD_SCOPE = "gpu_model_runner: forward"
 DRAFT_SCOPE = "gpu_model_runner: draft"
 DECODE_FORWARD_FACTOR = 2.5  # a prefill chunk's forward is far above this
-FULL_BATCH_FRACTION = 0.9  # rounds shorter than this share of the longest lost sequences
+# Shorter rounds may have lost sequences.
+FULL_BATCH_FRACTION = 0.9
 DRAFT_SAMPLE_SCOPE = "longspec: draft sample"
 GPU_CATS = ("kernel", "gpu_memcpy", "gpu_memset")
 LAUNCH_CATS = ("cuda_runtime", "cuda_driver")
 
 CATEGORIES = (
     ("attention", re.compile(r"flash|fmha|attn|mha", re.I)),
-    ("longspec", re.compile(r"mass_select|longspec|_c2q_|_gather_kernel|"
-                            r"_index_to_slot", re.I)),
+    (
+        "longspec",
+        re.compile(
+            r"mass_select|longspec|_c2q_|_gather_kernel|"
+            r"_index_to_slot",
+            re.I,
+        ),
+    ),
     ("gemm", re.compile(r"gemm|cutlass|xmma|cublas|nvjet|matmul", re.I)),
-    ("norm_rope_act", re.compile(r"rms_norm|rotary|silu|act_and_mul|"
-                                 r"layer_norm", re.I)),
+    (
+        "norm_rope_act",
+        re.compile(
+            r"rms_norm|rotary|silu|act_and_mul|"
+            r"layer_norm",
+            re.I,
+        ),
+    ),
     ("memcpy_memset", re.compile(r"memcpy|memset", re.I)),
 )
 
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, add_help=False)
-    p.add_argument("--rounds", type=int, default=12,
-                   help="decode rounds to profile after warmup")
+    p.add_argument(
+        "--rounds", type=int, default=12, help="decode rounds to profile after warmup"
+    )
     p.add_argument("--trace", help="reduce a saved trace; no engine")
     p.add_argument("--help", action="store_true")
     own, rest = p.parse_known_args(argv)
@@ -60,17 +76,19 @@ def parse_args(argv=None):
         p.print_help()
         print("\ngrid arguments:")
         grid.parse_args(["--help"])
-    return own, grid.parse_args(rest)
+    return own, None if own.trace else grid.parse_args(rest)
 
 
 # ---------------------------------------------------------------------------
 # Capture
 # ---------------------------------------------------------------------------
 
+
 def _install_markers(worker) -> None:
     """Worker side: one scope around the drafter's per-step sampler, so the
     draft splits into forward plus metadata versus sampling."""
     from torch.profiler import record_function
+
     drafter = getattr(worker.model_runner, "drafter", None)
     if drafter is None or not hasattr(drafter, "_save_hidden_states_and_sample"):
         return
@@ -86,14 +104,17 @@ def _install_markers(worker) -> None:
 def capture(own, args, run_dir: Path) -> Path:
     trace_dir = run_dir / f"trace-{args.ctx}-{args.batch}-{args.mode}"
     trace_dir.mkdir(parents=True, exist_ok=True)
-    llm, _ = grid.build_engine(args, profiler_config={
-        "profiler": "torch",
-        "torch_profiler_dir": str(trace_dir),
-        "torch_profiler_with_stack": False,
-        "torch_profiler_use_gzip": True,
-    })
+    llm, _ = grid.build_engine(
+        args,
+        profiler_config={
+            "profiler": "torch",
+            "torch_profiler_dir": str(trace_dir),
+            "torch_profiler_with_stack": False,
+            "torch_profiler_use_gzip": True,
+        },
+    )
     llm.collective_rpc(_install_markers)
-    prompts = grid.build_prompts(args)
+    prompts = grid.build_prompts(args)[: args.batch]
     grid.generate(llm, prompts, 1)  # graphs, JIT kernels, allocator
     grid.generate(llm, prompts, 8)
     per_round = 1 if args.mode == "dense" else args.spec_tokens
@@ -102,8 +123,7 @@ def capture(own, args, run_dir: Path) -> Path:
     elapsed, _ = grid.generate(llm, prompts, tokens)
     llm.stop_profile()
     print(f"profiled {tokens} tokens per sequence in {elapsed:.1f}s")
-    traces = sorted(trace_dir.glob("*.pt.trace.json*"),
-                    key=lambda f: f.stat().st_mtime)
+    traces = sorted(trace_dir.glob("*.pt.trace.json*"), key=lambda f: f.stat().st_mtime)
     assert traces, f"no trace written under {trace_dir}"
     return traces[-1]
 
@@ -111,6 +131,7 @@ def capture(own, args, run_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 # Reduction
 # ---------------------------------------------------------------------------
+
 
 def load_events(path: Path) -> list[dict]:
     opener = gzip.open if path.suffix == ".gz" else open
@@ -129,14 +150,17 @@ def category(name: str, cat: str) -> str:
 
 
 def reduce_trace(events: list[dict], skip_first: int = 2) -> dict:
-    scopes = [e for e in events
-              if e["name"].startswith(SCOPE_PREFIXES) and "dur" in e]
-    launches = {e["args"]["correlation"]: e for e in events
-                if e.get("cat") in LAUNCH_CATS
-                and "correlation" in e.get("args", {})}
+    scopes = [e for e in events if e["name"].startswith(SCOPE_PREFIXES) and "dur" in e]
+    launches = {
+        e["args"]["correlation"]: e
+        for e in events
+        if e.get("cat") in LAUNCH_CATS and "correlation" in e.get("args", {})
+    }
     gpu = [e for e in events if e.get("cat") in GPU_CATS]
-    assert scopes, "no vLLM scopes in the trace; set " \
-                   "VLLM_CUSTOM_SCOPES_FOR_PROFILING=1 before the engine starts"
+    assert scopes, (
+        "no vLLM scopes in the trace; set "
+        "VLLM_CUSTOM_SCOPES_FOR_PROFILING=1 before the engine starts"
+    )
 
     # Steps: consecutive preprocess scopes on the main thread.
     starts = sorted(e["ts"] for e in scopes if e["name"] == STEP_SCOPE)
@@ -169,9 +193,14 @@ def reduce_trace(events: list[dict], skip_first: int = 2) -> dict:
         return best["name"] if best else None
 
     main = max(by_thread, key=lambda k: len(by_thread[k]))
-    steps = defaultdict(lambda: {"gpu_us": defaultdict(float),
-                                 "kernels": defaultdict(lambda: [0.0, 0]),
-                                 "cats": defaultdict(float), "spans": []})
+    steps = defaultdict(
+        lambda: {
+            "gpu_us": defaultdict(float),
+            "kernels": defaultdict(lambda: [0.0, 0]),
+            "cats": defaultdict(float),
+            "spans": [],
+        }
+    )
     fallback = 0
     for k in gpu:
         corr = k.get("args", {}).get("correlation")
@@ -202,16 +231,19 @@ def reduce_trace(events: list[dict], skip_first: int = 2) -> dict:
     # the first decode steps and the last step, whose wall time is unknown.
     forward = {i: steps[i]["gpu_us"].get(FORWARD_SCOPE, 0.0) for i in steps}
     floor = min(v for v in forward.values() if v > 0)
-    decode = [i for i in sorted(steps)
-              if 0 < forward[i] <= DECODE_FORWARD_FACTOR * floor
-              and i + 1 < len(starts)]
+    decode = [
+        i
+        for i in sorted(steps)
+        if 0 < forward[i] <= DECODE_FORWARD_FACTOR * floor and i + 1 < len(starts)
+    ]
     rounds = decode[skip_first:]
     assert rounds, "no steady-state rounds after skipping warmup"
     # Sequences finish staggered, so late rounds carry fewer of them; keep
     # the full-batch cluster, the longest rounds.
     longest = max(starts[i + 1] - starts[i] for i in rounds)
-    rounds = [i for i in rounds
-              if starts[i + 1] - starts[i] >= FULL_BATCH_FRACTION * longest]
+    rounds = [
+        i for i in rounds if starts[i + 1] - starts[i] >= FULL_BATCH_FRACTION * longest
+    ]
     excluded = len(steps) - len(rounds)
 
     def busy_union(i: int) -> float:
@@ -226,14 +258,17 @@ def reduce_trace(events: list[dict], skip_first: int = 2) -> dict:
                 end = e
         return total
 
-    per_round = [{
-        "step": i,
-        "wall_ms": (starts[i + 1] - starts[i]) / 1e3,
-        "gpu_ms": busy_union(i) / 1e3,
-        "forward_gpu_ms": forward[i] / 1e3,
-        "draft_gpu_ms": steps[i]["gpu_us"].get(DRAFT_SCOPE, 0.0) / 1e3,
-        "draft_cpu_ms": steps[i].get("cpu_us", {}).get(DRAFT_SCOPE, 0.0) / 1e3,
-    } for i in rounds]
+    per_round = [
+        {
+            "step": i,
+            "wall_ms": (starts[i + 1] - starts[i]) / 1e3,
+            "gpu_ms": busy_union(i) / 1e3,
+            "forward_gpu_ms": forward[i] / 1e3,
+            "draft_gpu_ms": steps[i]["gpu_us"].get(DRAFT_SCOPE, 0.0) / 1e3,
+            "draft_cpu_ms": steps[i].get("cpu_us", {}).get(DRAFT_SCOPE, 0.0) / 1e3,
+        }
+        for i in rounds
+    ]
 
     n = len(rounds)
     wall = sum(starts[i + 1] - starts[i] for i in rounds) / n
@@ -259,17 +294,22 @@ def reduce_trace(events: list[dict], skip_first: int = 2) -> dict:
         "gpu_busy_ms": busy / 1e3,
         "idle_ms": (wall - busy) / 1e3,
         "per_round": per_round,
-        "gpu_ms_by_phase": {k: v / 1e3 for k, v in
-                            sorted(phases.items(), key=lambda kv: -kv[1])},
-        "cpu_ms_by_scope": {k: v / 1e3 for k, v in
-                            sorted(cpu.items(), key=lambda kv: -kv[1])},
+        "gpu_ms_by_phase": {
+            k: v / 1e3 for k, v in sorted(phases.items(), key=lambda kv: -kv[1])
+        },
+        "cpu_ms_by_scope": {
+            k: v / 1e3 for k, v in sorted(cpu.items(), key=lambda kv: -kv[1])
+        },
         "gpu_ms_by_phase_category": [
             {"phase": p, "category": c, "ms": us / 1e3}
-            for (p, c), us in sorted(cats.items(), key=lambda kv: -kv[1])],
+            for (p, c), us in sorted(cats.items(), key=lambda kv: -kv[1])
+        ],
         "top_kernels": [
             {"phase": p, "kernel": k[:90], "ms": us / 1e3, "calls": count}
             for (p, k), (us, count) in sorted(
-                kernels.items(), key=lambda kv: -kv[1][0])[:40]],
+                kernels.items(), key=lambda kv: -kv[1][0]
+            )[:40]
+        ],
         "kernels_attributed_by_time": fallback,
     }
 
@@ -283,7 +323,10 @@ def render(report: dict) -> str:
         f"ms, GPU busy {report['gpu_busy_ms']:.2f} ms, idle "
         f"{report['idle_ms']:.2f} ms",
         f"per-round wall ms: {walls}",
-        "", "| phase | GPU ms | CPU scope ms |", "|---|---|---|"]
+        "",
+        "| phase | GPU ms | CPU scope ms |",
+        "|---|---|---|",
+    ]
     cpu = report["cpu_ms_by_scope"]
     for phase, ms in report["gpu_ms_by_phase"].items():
         lines.append(f"| {phase} | {ms:.2f} | {cpu.get(phase, 0.0):.2f} |")
@@ -292,10 +335,14 @@ def render(report: dict) -> str:
         lines.append(f"| {row['phase']} | {row['category']} | {row['ms']:.2f} |")
     lines += ["", "| phase | kernel | GPU ms | calls |", "|---|---|---|---|"]
     for row in report["top_kernels"][:20]:
-        lines.append(f"| {row['phase']} | `{row['kernel']}` | {row['ms']:.2f} "
-                     f"| {row['calls']:.0f} |")
-    lines.append(f"\nkernels attributed by launch time (no correlation): "
-                 f"{report['kernels_attributed_by_time']}")
+        lines.append(
+            f"| {row['phase']} | `{row['kernel']}` | {row['ms']:.2f} "
+            f"| {row['calls']:.0f} |"
+        )
+    lines.append(
+        f"\nkernels attributed by launch time (no correlation): "
+        f"{report['kernels_attributed_by_time']}"
+    )
     return "\n".join(lines)
 
 
@@ -315,17 +362,24 @@ def main(argv=None) -> int:
         return 0
     os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     os.environ["VLLM_CUSTOM_SCOPES_FOR_PROFILING"] = "1"
-    run_dir = Path(args.out) if args.out else grid.create_run_dir("profile")
+    run_dir = Path(args.out)
     trace = capture(own, args, run_dir)
     print(f"trace {trace}")
     try:
         report = reduce_trace(load_events(trace))
     except Exception:  # keep the trace; the reduction can be rerun offline
         traceback.print_exc()
-        return 0
-    report.update(ctx=args.ctx, batch=args.batch, mode=args.mode,
-                  theta=args.theta, ratio=args.ratio, node=os.uname().nodename,
-                  git_sha=grid.git_sha(), trace=str(trace))
+        return 1
+    report.update(
+        ctx=args.ctx,
+        batch=args.batch,
+        mode=args.mode,
+        theta=grid.draft_top_p(args),
+        ratio=args.ratio,
+        node=os.uname().nodename,
+        git_sha=grid.git_sha(),
+        trace=str(trace),
+    )
     out = run_dir / f"profile-{args.ctx}-{args.batch}-{args.mode}.json"
     out.write_text(json.dumps(report, indent=1))
     print(render(report))
