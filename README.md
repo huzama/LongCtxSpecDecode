@@ -93,6 +93,16 @@ or Qwen3-8B and the Vegas baseline's 7% budget:
 
 Defaults: eight questions, batch 1, at most 512 generated tokens, stopping
 at EOS. Decode timing uses first/last token timestamps from one generation.
+For synchronized throughput, use `--measurement batch --batch B --samples N`,
+where N is at least B. Completed prefills wait for the rest of the batch. EOS is
+ignored; timing ends at the first finished request, before the batch shrinks.
+The runner rejects preemption and incomplete decode steps. Async scheduling is
+disabled for every mode. Use separate output directories for latency and batch
+measurements. Batch token files include prompt slots so repeated questions can
+be rescored correctly. The capacity search, shared-batch comparison, and each
+method's fastest-batch comparison are defined in [experiments.md](notes/experiments.md).
+These new batch measurements still require runtime validation before collecting results.
+
 Output comparisons report divergence separately; controlled tests still
 check equality. `--draft-weights target` selects an unquantized draft for
 agreement experiments. `w4_agreement.py --tokens <grid-token-file> --ctx <n>

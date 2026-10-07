@@ -57,6 +57,8 @@ def test_dense_output(tmp_path, model, checkpoint, ctx, theta, cap, min_alpha):
     cmd = [
         sys.executable,
         str(GRID),
+        "--measurement",
+        "batch",
         "--cells",
         ",".join(f"{ctx}:2:{mode}" for mode in modes),
         "--prompts-dir",

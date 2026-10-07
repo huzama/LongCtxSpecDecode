@@ -69,6 +69,31 @@ def summarize(rows) -> dict:
     }
 
 
+def source_prompts(args, payload):
+    """Recover repeated batch prompts in the order their continuations were saved."""
+    if isinstance(payload, dict):
+        for key in ("model", "ctx", "seed"):
+            if payload[key] != getattr(args, key):
+                raise ValueError(f"--{key} does not match the saved token file")
+        tokens, slots = payload["tokens"], payload["prompt_slots"]
+        count = payload["prompt_count"]
+        if (
+            count < 1
+            or len(slots) != len(tokens)
+            or any(not isinstance(slot, int) or not 0 <= slot < count for slot in slots)
+        ):
+            raise ValueError("invalid prompt slots in the token file")
+    else:
+        tokens = payload
+        count, slots = len(tokens), list(range(len(tokens)))
+    if not tokens or any(not continuation for continuation in tokens):
+        raise ValueError("the token file contains no tokens or an empty continuation")
+    args.samples, args.batch, args.measurement = count, 1, "latency"
+    args.gen = max(len(t) for t in tokens) + 1
+    pool = grid.build_prompts(args)
+    return [pool[slot] for slot in slots], tokens
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, add_help=False, allow_abbrev=False)
     p.add_argument("--tokens", help="grid tokens-<mode>-<ctx>-<batch>.json")
@@ -84,12 +109,10 @@ def main(argv=None) -> int:
     args = grid.parse_args(rest)
     if args.mode != "dense":
         p.error("the agreement scorer uses --mode dense")
-    tokens = json.loads(Path(own.tokens).read_text())
-    if not tokens:
-        p.error("the token file is empty")
-    args.samples, args.batch = len(tokens), 1
-    args.gen = max(len(t) for t in tokens) + 1
-    prompts = grid.build_prompts(args)
+    try:
+        prompts, tokens = source_prompts(args, json.loads(Path(own.tokens).read_text()))
+    except ValueError as exc:
+        p.error(str(exc))
     llm, _ = grid.build_engine(args, max_num_batched_tokens=own.score_chunk)
     start = time.perf_counter()
     record = {

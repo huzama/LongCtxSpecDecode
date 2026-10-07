@@ -12,6 +12,9 @@ range launched them (correlation id), falling back to launch time.
     round_phases.py --ctx 32768 --batch 1 --mode coverage --out outputs/runs/<run>
     round_phases.py --trace outputs/<run>/trace/<file>.pt.trace.json.gz
 
+Round selection in the reducer is a duration heuristic, not the exact full-batch
+timing window from grid.py. Use grid.py for reported throughput.
+
 Grid arguments are ``grid.py``'s. Reports go to the run directory as JSON
 and to stdout as a table; ``--trace`` re-runs the reduction on a saved trace.
 """
@@ -115,12 +118,19 @@ def capture(own, args, run_dir: Path) -> Path:
     )
     llm.collective_rpc(_install_markers)
     prompts = grid.build_prompts(args)[: args.batch]
-    grid.generate(llm, prompts, 1)  # graphs, JIT kernels, allocator
-    grid.generate(llm, prompts, 8)
+
+    def generate(max_tokens):
+        if args.measurement == "batch":
+            return grid.generate_batch(
+                llm, prompts, max_tokens, args.spec_tokens, args.mode in grid.SPEC_MODES
+            )[:2]
+        return grid.generate(llm, prompts, max_tokens)
+
+    generate(min(args.gen, 16))  # graphs, JIT kernels, allocator
     per_round = 1 if args.mode == "dense" else args.spec_tokens
-    tokens = own.rounds * per_round + 2
+    tokens = min(args.gen, own.rounds * per_round + 2)
     llm.start_profile()
-    elapsed, _ = grid.generate(llm, prompts, tokens)
+    elapsed, _ = generate(tokens)
     llm.stop_profile()
     print(f"profiled {tokens} tokens per sequence in {elapsed:.1f}s")
     traces = sorted(trace_dir.glob("*.pt.trace.json*"), key=lambda f: f.stat().st_mtime)
@@ -371,6 +381,8 @@ def main(argv=None) -> int:
         traceback.print_exc()
         return 1
     report.update(
+        measurement=args.measurement,
+        round_selection="duration_heuristic",
         ctx=args.ctx,
         batch=args.batch,
         mode=args.mode,
