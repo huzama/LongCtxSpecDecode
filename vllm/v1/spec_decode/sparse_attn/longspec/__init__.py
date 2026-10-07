@@ -1,12 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Long-context self-speculative drafting over a sparse KV view.
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Top-p selection and the FA2/FA3 helpers shared with Vegas."""
 
-Everything of ours lives here. ``portable`` runs verification-guided sparse
-drafting on any paged attention kernel, ``kernels`` holds the Triton kernels
-behind it. The fork is entered at three seams only: the overrider dispatcher,
-the proposer's model hook, and the speculative config fields.
-"""
-
-from .overrider import LongSpecAttnOverrider  # noqa: E402
+from .overrider import LongSpecAttnOverrider
 
 __all__ = ["LongSpecAttnOverrider"]

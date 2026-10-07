@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused mass selection: find k by attention mass, write the indices.
 
 One CUDA block per row of a ``[rows, max_len]`` metric. A row is one request
@@ -20,8 +21,6 @@ selects every candidate. Shared-memory float atomics make the count vary by
 one element at near-exact crossings.
 """
 
-import os
-
 import torch
 from torch.utils.cpp_extension import load_inline
 
@@ -32,6 +31,7 @@ _CUDA_SRC = r"""
 #include <torch/extension.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
+#include <c10/cuda/CUDAException.h>
 #include <cub/block/radix_rank_sort_operations.cuh>
 
 namespace mass_select {
@@ -329,19 +329,6 @@ __global__ void __launch_bounds__(BlockSize) SelectKernel(
     if (threadIdx.x == 0) used[row_id] = st.k + s_eff + r_eff;
 }
 
-#define DISPATCH_FLOAT_TYPES(dtype, DType, ...)                               \
-    [&]() {                                                                   \
-        if (dtype == at::ScalarType::Half) {                                  \
-            using DType = __half; return __VA_ARGS__();                       \
-        } else if (dtype == at::ScalarType::BFloat16) {                       \
-            using DType = __nv_bfloat16; return __VA_ARGS__();                \
-        } else if (dtype == at::ScalarType::Float) {                          \
-            using DType = float; return __VA_ARGS__();                        \
-        } else {                                                              \
-            TORCH_CHECK(false, "Unsupported dtype"); return false;            \
-        }                                                                     \
-    }()
-
 } // namespace mass_select
 
 void launch_mass_select(
@@ -365,23 +352,28 @@ void launch_mass_select(
     TORCH_CHECK(valid_lens.is_contiguous() && k_min.is_contiguous() &&
                 k_max.is_contiguous() && used.is_contiguous(),
                 "per-row tensors must be contiguous");
+    TORCH_CHECK(metric.scalar_type() == at::ScalarType::BFloat16,
+                "metric must be bfloat16");
+    for (const auto& tensor : {valid_lens, k_min, k_max, out_idx, used}) {
+        TORCH_CHECK(tensor.device() == metric.device(),
+                    "all tensors must be on the same CUDA device");
+    }
+    if (rows == 0) return;
     const c10::cuda::OptionalCUDAGuard guard(metric.device());
     const cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
-    DISPATCH_FLOAT_TYPES(metric.scalar_type(), DType, [&] {
-        mass_select::SelectKernel<DType>
-            <<<rows, mass_select::BlockSize, 0, stream>>>(
-            static_cast<DType*>(metric.data_ptr()),
-            static_cast<int32_t*>(valid_lens.data_ptr()),
-            static_cast<int32_t*>(k_min.data_ptr()),
-            static_cast<int32_t*>(k_max.data_ptr()),
-            static_cast<int32_t*>(out_idx.data_ptr()),
-            static_cast<int32_t*>(used.data_ptr()),
-            static_cast<int32_t>(metric.size(1)),
-            static_cast<int32_t>(out_idx.size(1)),
-            static_cast<float>(theta), static_cast<int32_t>(sink),
-            static_cast<int32_t>(recent));
-        return true;
-    });
+    mass_select::SelectKernel<__nv_bfloat16>
+        <<<rows, mass_select::BlockSize, 0, stream>>>(
+        static_cast<__nv_bfloat16*>(metric.data_ptr()),
+        static_cast<int32_t*>(valid_lens.data_ptr()),
+        static_cast<int32_t*>(k_min.data_ptr()),
+        static_cast<int32_t*>(k_max.data_ptr()),
+        static_cast<int32_t*>(out_idx.data_ptr()),
+        static_cast<int32_t*>(used.data_ptr()),
+        static_cast<int32_t>(metric.size(1)),
+        static_cast<int32_t>(out_idx.size(1)),
+        static_cast<float>(theta), static_cast<int32_t>(sink),
+        static_cast<int32_t>(recent));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 """
 
@@ -399,31 +391,42 @@ def _get_module():
     """JIT-compile once per process; needs nvcc and ninja on PATH."""
     global _module
     if _module is None:
-        os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0;8.9;9.0")
         _module = load_inline(
             name="longspec_select_jit",
             cpp_sources=_CPP_SRC,
             cuda_sources=_CUDA_SRC,
             functions=["launch_mass_select"],
-            extra_cuda_cflags=["-O3", "-std=c++17", "--expt-relaxed-constexpr",
-                               "--expt-extended-lambda"],
+            extra_cuda_cflags=[
+                "-O3",
+                "-std=c++17",
+                "--expt-relaxed-constexpr",
+                "--expt-extended-lambda",
+            ],
             verbose=False,
         )
     return _module
 
 
 def mass_select(
-    metric: torch.Tensor,      # [rows, max_len] bf16/fp16/fp32, contiguous
+    metric: torch.Tensor,  # [rows, max_len] bf16, contiguous
     valid_lens: torch.Tensor,  # [rows] int32
-    k_min: torch.Tensor,       # [rows] int32
-    k_max: torch.Tensor,       # [rows] int32
-    table: torch.Tensor,       # [rows, width] int32, written in place
-    used: torch.Tensor,        # [rows] int32, written in place
+    k_min: torch.Tensor,  # [rows] int32
+    k_max: torch.Tensor,  # [rows] int32
+    table: torch.Tensor,  # [rows, width] int32, written in place
+    used: torch.Tensor,  # [rows] int32, written in place
     theta: float,
     sink: int,
     recent: int,
 ) -> None:
     """Select per row; see the module docstring for the contract."""
     _get_module().launch_mass_select(
-        metric, valid_lens, k_min, k_max, table, used, float(theta),
-        int(sink), int(recent))
+        metric,
+        valid_lens,
+        k_min,
+        k_max,
+        table,
+        used,
+        float(theta),
+        int(sink),
+        int(recent),
+    )

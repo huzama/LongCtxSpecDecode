@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Variable-length mean reduce — single-file, JIT-compiled.
 
@@ -26,7 +28,6 @@ Output (bf16): output (batch, max_seqlen)
 Accumulation in fp32.
 """
 
-import os
 import torch
 from torch.utils.cpp_extension import load_inline
 
@@ -383,11 +384,6 @@ def _get_module():
     if _module is not None:
         return _module
 
-    os.environ.setdefault(
-        "TORCH_CUDA_ARCH_LIST",
-        "8.0;8.9;9.0",
-    )
-
     _module = load_inline(
         name="varlen_reduce_jit",
         cpp_sources=_CPP_SRC,
@@ -407,6 +403,7 @@ def _get_module():
 # ----------------------------------------------------------------
 # Public API
 # ----------------------------------------------------------------
+
 
 def varlen_reduce(
     x: torch.Tensor,
@@ -480,6 +477,13 @@ def varlen_reduce(
         assert cu_seqlens_q.shape == (bs + 1,)
 
     _get_module().launch_varlen_reduce(
-        x, lse, cu_seqlens_q, output, valid_lens, reduce_entry,
-        float(softmax_scale), bool(use_weight))
+        x,
+        lse,
+        cu_seqlens_q,
+        output,
+        valid_lens,
+        reduce_entry,
+        float(softmax_scale),
+        bool(use_weight),
+    )
     return output

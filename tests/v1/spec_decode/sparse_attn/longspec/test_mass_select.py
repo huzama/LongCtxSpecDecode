@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The fused selection must match a float64 reference: reserved ranges, the
 mass crossing, tie resolution, clamps, and empty rows."""
+
 import pytest
 import torch
 
@@ -19,7 +21,7 @@ def reference_k(row: torch.Tensor, S: int, R: int, theta: float) -> int:
     P = row.numel()
     s_eff = min(S, P)
     r_eff = min(R, P - s_eff)
-    cand = row[s_eff:P - r_eff]
+    cand = row[s_eff : P - r_eff]
     if cand.numel() == 0 or theta >= 1:
         return cand.numel()
     total = row.sum()
@@ -46,14 +48,14 @@ def check_row(metric_row, table_row, used, P, S, R, theta, k_min, k_max):
     k_ref = clamp(reference_k(row, S, R, theta), k_min, k_max, n_cand)
     k = int(used) - s_eff - r_eff
     assert k_lo <= k <= k_hi, (k, k_lo, k_ref, k_hi)
-    idx = table_row[:int(used)].long()
+    idx = table_row[: int(used)].long()
     assert idx.unique().numel() == idx.numel()
     assert idx.min() >= 0 and idx.max() < P
     reserved = torch.cat([torch.arange(s_eff), torch.arange(P - r_eff, P)])
     assert torch.equal(idx[k:].sort().values.cpu(), reserved)
     chosen = idx[:k]
     assert torch.all((chosen >= s_eff) & (chosen < P - r_eff))
-    cand = row[s_eff:P - r_eff]
+    cand = row[s_eff : P - r_eff]
     top = cand.sort(descending=True).values[:k]
     assert torch.equal(row[chosen].sort(descending=True).values, top)
 
@@ -94,8 +96,7 @@ def test_matches_reference(theta, sparse):
         if P == 0:
             assert int(used[r]) == 0 and torch.all(table[r] == -1)
             continue
-        check_row(metric[r], table[r], used[r], P, S, R, theta, k_min[r],
-                  k_max[r])
+        check_row(metric[r], table[r], used[r], P, S, R, theta, k_min[r], k_max[r])
 
 
 def test_theta_one_selects_every_candidate():
@@ -104,8 +105,9 @@ def test_theta_one_selects_every_candidate():
     metric[0, 1000:2000] = 0  # zero-mass candidates count too
     table, used = run(metric, [P], S, R, 1.0, [0], [P])
     assert int(used[0]) == P
-    assert torch.equal(table[0, :P].sort().values.cpu(),
-                       torch.arange(P, dtype=torch.int32))
+    assert torch.equal(
+        table[0, :P].sort().values.cpu(), torch.arange(P, dtype=torch.int32)
+    )
 
 
 def test_clamps():
@@ -119,8 +121,7 @@ def test_clamps():
     k_max = [P, P, k_star - 20, k_star - 20]
     table, used = run(metric, [P] * 4, S, R, 0.9, k_min, k_max)
     for r in range(4):
-        check_row(metric[r], table[r], used[r], P, S, R, 0.9, k_min[r],
-                  k_max[r])
+        check_row(metric[r], table[r], used[r], P, S, R, 0.9, k_min[r], k_max[r])
     assert int(used[1]) - S - R == k_star + 50
     assert int(used[2]) - S - R == k_star - 20
     assert int(used[3]) - S - R == k_star - 20  # cap wins over the floor
@@ -129,13 +130,13 @@ def test_clamps():
 def test_zero_and_tied_rows():
     device, S, R, P = "cuda", 2, 2, 512
     metric = torch.zeros(3, P, device=device, dtype=torch.bfloat16)
-    metric[1, :P] = 1.0 / P            # all tied
-    metric[2, 10:20] = 0.1             # ten equal spikes, rest zero
+    metric[1, :P] = 1.0 / P  # all tied
+    metric[2, 10:20] = 0.1  # ten equal spikes, rest zero
     table, used = run(metric, [P] * 3, S, R, 0.9, [0] * 3, [P] * 3)
-    assert int(used[0]) == S + R       # no mass: reserved only
+    assert int(used[0]) == S + R  # no mass: reserved only
     for r in (1, 2):
         check_row(metric[r], table[r], used[r], P, S, R, 0.9, 0, P)
-    assert int(used[2]) - S - R == 9    # 0.9 of ten equal spikes
+    assert int(used[2]) - S - R == 9  # 0.9 of ten equal spikes
 
 
 def test_reserved_covers_short_rows():
@@ -145,8 +146,9 @@ def test_reserved_covers_short_rows():
     table, used = run(metric, P_list, S, R, 0.9, [0] * 4, [12] * 4)
     for r, P in enumerate(P_list):
         assert int(used[r]) == P
-        assert torch.equal(table[r, :P].sort().values.cpu(),
-                           torch.arange(P, dtype=torch.int32))
+        assert torch.equal(
+            table[r, :P].sort().values.cpu(), torch.arange(P, dtype=torch.int32)
+        )
 
 
 def test_min_tokens_fills_from_the_top():
@@ -155,3 +157,11 @@ def test_min_tokens_fills_from_the_top():
     table, used = run(metric, [P], S, R, 0.5, [300], [P])
     assert int(used[0]) == 300
     check_row(metric[0], table[0], used[0], P, S, R, 0.5, 300, P)
+
+
+def test_rejects_host_lengths():
+    metric = torch.zeros(1, 16, device="cuda", dtype=torch.bfloat16)
+    row = torch.zeros(1, device="cuda", dtype=torch.int32)
+    table = torch.zeros(1, 16, device="cuda", dtype=torch.int32)
+    with pytest.raises(RuntimeError, match="same CUDA device"):
+        mass_select(metric, row.cpu(), row, row, table, row, 0.85, 4, 4)

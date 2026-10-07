@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import sys
 from abc import ABC, abstractmethod
 from math import ceil
 
@@ -38,16 +39,18 @@ class BaseAttnOverrider(ABC):
 
         # TODO: Develop a more reliable way to iterate through attn layers.
         self.num_layers = self.vllm_config.model_config.get_num_layers(
-                self.vllm_config.parallel_config)
+            self.vllm_config.parallel_config
+        )
         self.curr_layer = 0
 
         # TODO: Support more attention backends.
         if BaseAttnOverrider._GLOBAL_OVERRIDER_COUNT == 0:
             import vllm.v1.attention.backends.flash_attn as flash_attn
-            BaseAttnOverrider._original_attn_func = \
-                flash_attn.flash_attn_varlen_func
-            flash_attn.flash_attn_varlen_func = \
-                lambda *args, **kwargs: self._attention(*args, **kwargs)
+
+            BaseAttnOverrider._original_attn_func = flash_attn.flash_attn_varlen_func
+            flash_attn.flash_attn_varlen_func = lambda *args, **kwargs: self._attention(
+                *args, **kwargs
+            )
 
         # By default, we are not inside the propose method
         self.in_propose = False
@@ -56,12 +59,14 @@ class BaseAttnOverrider(ABC):
         BaseAttnOverrider._GLOBAL_OVERRIDER_COUNT += 1
 
     def __del__(self):
+        if sys.is_finalizing():
+            return
         # Decrement the global overrider count
         BaseAttnOverrider._GLOBAL_OVERRIDER_COUNT -= 1
         if BaseAttnOverrider._GLOBAL_OVERRIDER_COUNT == 0:
             import vllm.v1.attention.backends.flash_attn as flash_attn
-            flash_attn.flash_attn_varlen_func = \
-                BaseAttnOverrider._original_attn_func
+
+            flash_attn.flash_attn_varlen_func = BaseAttnOverrider._original_attn_func
 
     def enter_propose(self):
         self.in_propose = True
@@ -70,10 +75,6 @@ class BaseAttnOverrider(ABC):
     def exit_propose(self):
         self.in_propose = False
         assert self.curr_layer == 0
-
-    def bind_model(self, model) -> None:
-        """Called once the target model is loaded; overriders that hook the
-        model itself override this."""
 
     def _attention(self, *args, **kwargs):
         if self.in_propose:
@@ -100,22 +101,30 @@ def build_attention_overrider(
     assert vllm_config.speculative_config is not None
 
     method = vllm_config.speculative_config.sparse_attn_algorithm
+    if method in (
+        "coverage",
+        "vegas",
+    ) and vllm_config.cache_config.cache_dtype.startswith("fp8"):
+        raise ValueError("sparse attention scoring requires a non-FP8 KV cache")
     if method == "streamingllm":
         from .streamingllm import StreamingLLMAttnOverrider
+
         cls = StreamingLLMAttnOverrider
     elif method == "vegas":
         from .vegas import VegasAttnOverrider
+
         cls = VegasAttnOverrider
-    elif method in ("coverage", "longspec"):
+    elif method == "coverage":
         from vllm.v1.spec_decode.sparse_attn.longspec import (
             LongSpecAttnOverrider,
         )
+
         cls = LongSpecAttnOverrider
     else:
         raise ValueError(f"Unknown sparse_attn_algorithm: {method}")
 
-    cls_name = cls.__name__.strip('\'')
-    logger.info(f"Resolved attention overrider: {cls_name}")
+    cls_name = cls.__name__.strip("'")
+    logger.info("Resolved attention overrider: %s", cls_name)
 
     # Instantiate the attention overrider.
     return cls(

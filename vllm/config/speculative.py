@@ -161,49 +161,27 @@ class SpeculativeConfig:
     or equal to this value."""
 
     # Self-speculative decoding with sparse attention
-    sparse_attn_algorithm: Literal[
-        "streamingllm", "vegas", "coverage", "longspec"
-    ] = "streamingllm"
-    """The KV sparsity pattern used by self-speculative decoding. "coverage"
-    is attention-mass selection alone; "longspec" is the full method, the
-    same selection plus the layer skip masks."""
+    sparse_attn_algorithm: Literal["streamingllm", "vegas", "coverage"] = "streamingllm"
+    """Draft KV selection. The existing coverage setting selects by attention mass."""
 
-    sparse_attn_ratio: float = Field(default=0.05, gt=0, le=1)
-    """The ratio of tokens to attend to in sparse attention. Only used when
-    sparse_attn_algorithm is specified. Defaults to 0.05. For "coverage" and
-    "longspec" it caps the per-layer budget; 1 means uncapped."""
+    sparse_attn_ratio: float | None = Field(default=None, gt=0, le=1)
+    """Draft KV fraction. Default: cap 0.15 for coverage, fixed 0.05 otherwise.
+    Reserved sink and recent tokens are additional to the coverage cap."""
 
-    sparse_attn_min_tokens: int = Field(default=256, ge=0)
-    """The minimum number of tokens to attend to in sparse attention. Only used
-    when sparse_attn_algorithm is specified. Defaults to 256."""
+    sparse_attn_min_tokens: int | None = Field(default=None, ge=0)
+    """Draft KV floor. Default: 0 for coverage, 256 otherwise."""
 
-    sparse_attn_theta: float = Field(default=0.9, gt=0, le=1)
-    """Attention-mass target of "coverage" and "longspec": per layer and
-    request, the draft attends the smallest top-p set whose attention mass,
-    together with the reserved sink and recent tokens, reaches this
-    fraction."""
+    sparse_attn_theta: float = Field(default=0.85, gt=0, le=1)
+    """Coverage attention-mass target, including reserved sink and recent tokens."""
 
     sparse_attn_sink: int = Field(default=4, ge=0)
-    """Number of leading tokens the "coverage" and "longspec" drafts always
-    attend."""
+    """Leading tokens always kept by coverage selection."""
 
     sparse_attn_recent: int = Field(default=64, ge=0)
-    """Number of most recent scored tokens the "coverage" and "longspec"
-    drafts always attend."""
+    """Recent scored tokens always kept by coverage selection."""
 
-    sparse_attn_skip_attn_layers: list[int] = Field(default_factory=list)
-    """Layers whose attention sublayer the "longspec" draft skips (attention
-    output zero, residual passes through). Not allowed with "coverage"."""
-
-    sparse_attn_skip_layers: list[int] = Field(default_factory=list)
-    """Layers the "longspec" draft bypasses entirely. Requires enforce_eager.
-    Not allowed with "coverage"."""
-
-    sparse_attn_packed_verify: bool = True
-    """Pack the query heads of each KV head into the row dimension of the
-    "coverage" and "longspec" verify pass so FA2 reads the KV cache once
-    instead of once per query head. Applies to the uniform multi-query
-    decode shape on FA2; other shapes and kernels run unchanged."""
+    sparse_attn_collect_stats: bool = False
+    """Collect per-layer selection budgets for benchmarks."""
 
     sparse_attn_score_source: Literal["auto", "kernel", "recompute"] = "auto"
     """Where the verification-guided scores come from: the attention kernel
@@ -348,6 +326,14 @@ class SpeculativeConfig:
         return hf_config
 
     def __post_init__(self):
+        if self.sparse_attn_ratio is None:
+            self.sparse_attn_ratio = (
+                0.15 if self.sparse_attn_algorithm == "coverage" else 0.05
+            )
+        if self.sparse_attn_min_tokens is None:
+            self.sparse_attn_min_tokens = (
+                0 if self.sparse_attn_algorithm == "coverage" else 256
+            )
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
         # will be used to set the draft model, eagle head, or additional weight
@@ -806,7 +792,10 @@ class SpeculativeConfig:
 
     def __repr__(self) -> str:
         method = self.method
-        model = None if method in ("ngram", "suffix", "sparse_attn") \
+        model = (
+            None
+            if method in ("ngram", "suffix", "sparse_attn")
             else self.draft_model_config.model
+        )
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"

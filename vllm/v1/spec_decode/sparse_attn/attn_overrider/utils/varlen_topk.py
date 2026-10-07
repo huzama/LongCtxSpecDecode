@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Batch Top-K — single-file, JIT-compiled.
 
@@ -10,9 +12,7 @@ Input:  metric (batch_size, max_len) — float16/bfloat16/float32
 Output: out_idxs (batch_size, max_k) — int32, filled in-place
 """
 
-import os
 import torch
-from typing import Optional
 from torch.utils.cpp_extension import load_inline
 
 # ----------------------------------------------------------------
@@ -641,11 +641,6 @@ def _get_module():
     if _module is not None:
         return _module
 
-    os.environ.setdefault(
-        "TORCH_CUDA_ARCH_LIST",
-        "8.0;8.9;9.0",
-    )
-
     _module = load_inline(
         name="batch_topk_jit",
         cpp_sources=_CPP_SRC,
@@ -665,6 +660,7 @@ def _get_module():
 # ----------------------------------------------------------------
 # Public API
 # ----------------------------------------------------------------
+
 
 def calc_topk_workspace_size(batch_size: int, max_len: int, max_k: int) -> int:
     """Calculate required workspace size for batch_topk.
@@ -693,8 +689,7 @@ def _path_key(max_len: int, dtype: torch.dtype) -> tuple:
     return (int(max_len), str(dtype))
 
 
-def _resolve_force_path(batch_size: int, max_len: int,
-                        dtype: torch.dtype) -> int:
+def _resolve_force_path(batch_size: int, max_len: int, dtype: torch.dtype) -> int:
     """Map a request to a path using the autotuned crossover, if available."""
     crossover = _PATH_CROSSOVER.get(_path_key(max_len, dtype))
     if crossover is None:
@@ -707,9 +702,9 @@ def varlen_topk(
     topks: torch.Tensor,
     valid_lens: torch.Tensor,
     output: torch.Tensor,
-    buf: Optional[torch.Tensor] = None,
+    buf: torch.Tensor | None = None,
     select_min: bool = False,
-    force_path: Optional[int] = None,
+    force_path: int | None = None,
 ) -> None:
     """Batch top-k selection with variable k per row.
 
@@ -777,8 +772,13 @@ def autotune_path(
     import time
 
     key = _path_key(max_len, dtype)
-    ladder = sorted({b for b in (1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128,
-                                 max_batch_size) if 1 <= b <= max_batch_size})
+    ladder = sorted(
+        {
+            b
+            for b in (1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, max_batch_size)
+            if 1 <= b <= max_batch_size
+        }
+    )
 
     def _time(metric, ks, vl, out, buf, fp) -> float:
         for _ in range(warmup):
@@ -798,11 +798,15 @@ def autotune_path(
     for bs in ladder:
         metric = torch.randn(bs, max_len, device=device, dtype=dtype)
         vl = torch.full((bs,), vlen, device=device, dtype=torch.int32)
-        ks = torch.full((bs,), max(1, int(vlen * sparse_ratio)),
-                        device=device, dtype=torch.int32)
+        ks = torch.full(
+            (bs,), max(1, int(vlen * sparse_ratio)), device=device, dtype=torch.int32
+        )
         max_k = int(ks.max())
-        buf = torch.empty(calc_topk_workspace_size(bs, max_len, max_k),
-                          dtype=torch.uint8, device=device)
+        buf = torch.empty(
+            calc_topk_workspace_size(bs, max_len, max_k),
+            dtype=torch.uint8,
+            device=device,
+        )
         out = torch.full((bs, max_k), -1, device=device, dtype=torch.int32)
         t_single = _time(metric, ks, vl, out, buf, _SINGLE)
         t_multi = _time(metric, ks, vl, out, buf, _MULTI)

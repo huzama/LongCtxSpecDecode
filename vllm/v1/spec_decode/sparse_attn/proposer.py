@@ -72,7 +72,9 @@ def _method_wrapper(enter_fn, exit_fn):
                 return method(self, *args, **kwargs)
             finally:
                 exit_fn(self)
+
         return wrapper
+
     return decorator
 
 
@@ -93,8 +95,7 @@ class SparseAttnProposer:
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
-        self.num_speculative_tokens = \
-            self.speculative_config.num_speculative_tokens
+        self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
         self.block_size = vllm_config.cache_config.block_size
         self.hidden_size = vllm_config.model_config.get_hidden_size()
 
@@ -116,7 +117,8 @@ class SparseAttnProposer:
         # which has one more element than batch_size.
         max_num_slots_for_arange = max(max_batch_size + 1, max_batch_size)
         self.arange = torch.arange(
-            max_num_slots_for_arange, device=device, dtype=torch.int32)
+            max_num_slots_for_arange, device=device, dtype=torch.int32
+        )
 
         self.backup_next_token_ids = CpuGpuBuffer(
             max_batch_size,
@@ -133,13 +135,15 @@ class SparseAttnProposer:
         # Sampled draft token ids buffer.
         self._sampled_token_ids = torch.empty(
             (max_batch_size, self.num_speculative_tokens),
-            dtype=torch.int32, device=device
+            dtype=torch.int32,
+            device=device,
         )
 
         # Last hidden states for draft tokens
         self._draft_hidden_states = torch.empty(
             (max_batch_size, self.num_speculative_tokens, self.hidden_size),
-            dtype=self.dtype, device=device
+            dtype=self.dtype,
+            device=device,
         )
         # Previous req_id_to_index for potentially reordering the batch.
         self._prev_req_id_to_index: dict[str, int] | None = None
@@ -155,15 +159,9 @@ class SparseAttnProposer:
             with_numpy=True,
         )
 
-        # Initialize attention overrider.
-        self.attn_overrider = build_attention_overrider(
-            vllm_config=self.vllm_config,
-            device=self.device,
-        )
-
     @property
     def sampled_token_ids(self) -> torch.Tensor:
-        return self._sampled_token_ids[:self.batch_size]
+        return self._sampled_token_ids[: self.batch_size]
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
         # This should be called BEFORE adjust_cudagraph_sizes_for_spec_decode.
@@ -180,11 +178,12 @@ class SparseAttnProposer:
         # size exceeds the padded batch size. Trim the keys to that bound:
         # the key set is what the capture pass captures and dispatch
         # replays, and it must hold exactly the reachable sizes.
-        keys = self.cudagraph_dispatcher.cudagraph_keys[
-            CUDAGraphMode.PIECEWISE]
+        keys = self.cudagraph_dispatcher.cudagraph_keys[CUDAGraphMode.PIECEWISE]
         max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
-        bound = min((desc.num_tokens for desc in keys
-                     if desc.num_tokens >= max_num_seqs), default=None)
+        bound = min(
+            (desc.num_tokens for desc in keys if desc.num_tokens >= max_num_seqs),
+            default=None,
+        )
         if bound is not None:
             keys -= {desc for desc in keys if desc.num_tokens > bound}
 
@@ -198,12 +197,15 @@ class SparseAttnProposer:
         num_draft_tokens = spec_decode_metadata.num_draft_tokens
         total_tokens = sum(num_draft_tokens)
 
-        if not self._need_batch_reorder and \
-                batch_size * self.num_speculative_tokens == total_tokens:
+        if (
+            not self._need_batch_reorder
+            and batch_size * self.num_speculative_tokens == total_tokens
+        ):
             # Fast path: no reorder and every request drafted exactly gamma
             # tokens — just reshape the contiguous buffer (no copy).
-            hidden_states = (self._draft_hidden_states[:batch_size]
-                             .reshape(-1, self.hidden_size))
+            hidden_states = self._draft_hidden_states[:batch_size].reshape(
+                -1, self.hidden_size
+            )
         else:
             # Need the gather kernel: either the batch was reordered
             # or the number of drafted tokens per request is not uniform
@@ -223,8 +225,7 @@ class SparseAttnProposer:
 
         # Compute the draft probabilities.
         draft_logits: torch.Tensor = self.model.compute_logits(hidden_states)
-        return compute_probs(
-            draft_logits, cu_num_draft_tokens, sampling_metadata)
+        return compute_probs(draft_logits, cu_num_draft_tokens, sampling_metadata)
 
     def _save_hidden_states_and_sample(
         self,
@@ -233,9 +234,8 @@ class SparseAttnProposer:
         sampling_metadata: SamplingMetadata,
     ):
         # Save draft hidden states for later use in verification.
-        hidden_states = hidden_states[:self.batch_size]
-        self._draft_hidden_states[:self.batch_size, draft_depth].copy_(
-            hidden_states)
+        hidden_states = hidden_states[: self.batch_size]
+        self._draft_hidden_states[: self.batch_size, draft_depth].copy_(hidden_states)
 
         # Compute the draft logits
         logits = self.model.compute_logits(hidden_states)
@@ -244,7 +244,7 @@ class SparseAttnProposer:
         # top-k/top-p, and sampling in-place on logits).
         output: SamplerOutput = self.runner.sampler(logits, sampling_metadata)
         token_ids = output.sampled_token_ids.flatten()
-        self._sampled_token_ids[:self.batch_size, draft_depth].copy_(token_ids)
+        self._sampled_token_ids[: self.batch_size, draft_depth].copy_(token_ids)
 
     def update_batch_order(self, req_id_to_index: dict[str, int]):
         # Initialization: no previous hidden states to remap.
@@ -306,8 +306,9 @@ class SparseAttnProposer:
         # still be read by the main model's next-step prepare_input, so an
         # in-place op here could corrupt it.
         if num_rejected_tokens_gpu is not None:
-            common_attn_metadata.seq_lens = \
+            common_attn_metadata.seq_lens = (
                 common_attn_metadata.seq_lens - num_rejected_tokens_gpu
+            )
 
         # Mask out the positions that exceed the max model length.
         # Otherwise, we may get out-of-range error in RoPE.
@@ -320,10 +321,12 @@ class SparseAttnProposer:
         common_attn_metadata.num_actual_tokens = num_tokens
         common_attn_metadata.max_query_len = 1
         common_attn_metadata.query_start_loc = self.arange[: num_tokens + 1]
-        common_attn_metadata.query_start_loc_cpu = \
-            torch.from_numpy(self.token_arange_np[: num_tokens + 1]).clone()
-        common_attn_metadata.max_seq_len = \
-            min(common_attn_metadata.max_seq_len + 1, self.max_model_len)
+        common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
+            self.token_arange_np[: num_tokens + 1]
+        ).clone()
+        common_attn_metadata.max_seq_len = min(
+            common_attn_metadata.max_seq_len + 1, self.max_model_len
+        )
         # For the requests that exceed the max model length, we set
         # their sequence lengths to 1 to minimize their overheads in attention.
         common_attn_metadata.seq_lens = clamped_positions + 1
@@ -331,14 +334,17 @@ class SparseAttnProposer:
         # Compute the slot mapping.
         block_numbers = clamped_positions // self.block_size
         block_ids = common_attn_metadata.block_table_tensor.gather(
-            dim=1, index=block_numbers.view(-1, 1))
+            dim=1, index=block_numbers.view(-1, 1)
+        )
         block_ids = block_ids.view(-1)
-        common_attn_metadata.slot_mapping[:num_tokens].copy_((
-            block_ids * self.block_size + clamped_positions % self.block_size))
+        common_attn_metadata.slot_mapping[:num_tokens].copy_(
+            block_ids * self.block_size + clamped_positions % self.block_size
+        )
         # Mask out the slot mappings that exceed the max model length.
         # Otherwise, the KV cache will be updated with the padding tokens.
         common_attn_metadata.slot_mapping[:num_tokens].masked_fill_(
-            exceeds_max_model_len, PADDING_SLOT_ID)
+            exceeds_max_model_len, PADDING_SLOT_ID
+        )
         slot_mapping = common_attn_metadata.slot_mapping[:num_tokens]
 
         if self.attn_metadata_builder is None:
@@ -348,7 +354,8 @@ class SparseAttnProposer:
 
         # Create and update attention metadata for the first drafting step.
         attn_metadata = attn_metadata_builder.build_for_drafting(
-            common_attn_metadata=common_attn_metadata, draft_index=0)
+            common_attn_metadata=common_attn_metadata, draft_index=0
+        )
         assert isinstance(attn_metadata, self.allowed_attn_types), (
             f"Attention metadata type {type(attn_metadata)} not supported. "
             f"Supported types: {self.allowed_attn_types}"
@@ -362,8 +369,9 @@ class SparseAttnProposer:
             per_layer_attn_metadata[layer_name] = attn_metadata
             per_layer_slot_mapping[layer_name] = slot_mapping
 
-        cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = \
+        cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
             self._determine_batch_execution_and_padding(num_tokens)
+        )
 
         model_kwargs = {
             "input_ids": self.input_ids[:num_input_tokens],
@@ -392,34 +400,33 @@ class SparseAttnProposer:
 
         # Speculatively sample multiple tokens.
         for step in range(1, self.num_speculative_tokens):
-            self.input_ids[:num_tokens] = \
-                self._sampled_token_ids[:num_tokens, step - 1]
+            self.input_ids[:num_tokens] = self._sampled_token_ids[:num_tokens, step - 1]
             self.positions[:num_tokens] += 1
 
             # Mask out the positions that exceed the max model length.
             # Otherwise, we may get out-of-range error in RoPE.
             positions = self.positions[:num_tokens]
             exceeds_max_model_len = positions >= self.max_model_len
-            clamped_positions = \
-                torch.where(exceeds_max_model_len, 0, positions)
+            clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
             self.positions[:num_tokens] = clamped_positions
 
             # Update the attention metadata. Accumulate on attn_metadata's own
             # field (reused across steps): common_attn_metadata.max_seq_len is
             # fixed before the loop, so reading it here would pin max_seq_len
             # at +1 even though seq_lens grows by one every step.
-            attn_metadata.max_seq_len = \
-                min(attn_metadata.max_seq_len + 1, self.max_model_len)
+            attn_metadata.max_seq_len = min(
+                attn_metadata.max_seq_len + 1, self.max_model_len
+            )
             attn_metadata.seq_lens[:num_tokens].copy_(clamped_positions + 1)
 
             # Compute the slot mapping.
             block_numbers = clamped_positions // self.block_size
             block_ids = attn_metadata.block_table.gather(
-                dim=1, index=block_numbers.view(-1, 1))
+                dim=1, index=block_numbers.view(-1, 1)
+            )
             block_ids = block_ids.view(-1)
             slot_mapping.copy_(
-                block_ids * self.block_size +
-                clamped_positions % self.block_size
+                block_ids * self.block_size + clamped_positions % self.block_size
             )
             # Mask out the slot mappings that exceed the max model length.
             # Otherwise, the KV cache will be inadvertently updated with
@@ -487,8 +494,7 @@ class SparseAttnProposer:
         assert discard_request_mask.dtype == torch.bool
         assert backup_tokens_gpu.dtype == torch.int32
 
-        next_token_ids = \
-            torch.empty(batch_size, dtype=torch.int32, device=device)
+        next_token_ids = torch.empty(batch_size, dtype=torch.int32, device=device)
         valid_sampled_tokens_count = next_token_ids.new_empty(batch_size)
 
         # Kernel grid: one program per request (row)
@@ -546,8 +552,7 @@ class SparseAttnProposer:
         )
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        new_query_len_per_req = \
-            query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        new_query_len_per_req = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
         total_num_tokens = query_start_loc_cpu[-1].item()
 
@@ -556,8 +561,7 @@ class SparseAttnProposer:
             seq_lens=common_attn_metadata.seq_lens,
             query_start_loc_cpu=query_start_loc_cpu,
             _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
-            _num_computed_tokens_cpu=(
-                common_attn_metadata._num_computed_tokens_cpu),
+            _num_computed_tokens_cpu=(common_attn_metadata._num_computed_tokens_cpu),
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             max_query_len=new_query_len_per_req.max().item(),
@@ -580,22 +584,27 @@ class SparseAttnProposer:
         # attention modules, embeddings and lm_head.
         draft_weights = self.speculative_config.sparse_attn_draft_weights
         if draft_weights is not None:
-            from vllm.v1.spec_decode.sparse_attn.draft_weights import (
-                load_draft_model)
-            self.model = load_draft_model(
-                self.vllm_config, target_model, draft_weights)
+            from vllm.v1.spec_decode.sparse_attn.draft_weights import load_draft_model
+
+            self.model = load_draft_model(self.vllm_config, target_model, draft_weights)
         else:
             self.model = target_model
 
         # Register attention layers and their metadata builders.
-        self.attn_layer_names = list(get_layers_from_vllm_config(
-            self.vllm_config, AttentionLayerBase).keys())
+        self.attn_layer_names = list(
+            get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
+        )
 
         # Reuse runner's buffers for inputs and positions.
         self.input_ids = self.runner.input_ids.gpu
         self.positions = self.runner.positions.gpu
 
-        self.attn_overrider.bind_model(self.model)
+        # Allocate persistent draft buffers inside the runner's model-loading
+        # memory accounting, before it sizes the KV cache.
+        self.attn_overrider = build_attention_overrider(
+            vllm_config=self.vllm_config,
+            device=self.device,
+        )
 
         # gather_draft_hidden_states JIT-compiles its CUDA module on first
         # use, which is the first verified round with non-uniform draft
@@ -612,10 +621,11 @@ class SparseAttnProposer:
         attn_metadata: dict[str, FlashAttentionMetadata] | None = None,
         slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
-        cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = \
+        cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
             self._determine_batch_execution_and_padding(
                 num_tokens, use_cudagraphs=use_cudagraphs
             )
+        )
         if not is_graph_capturing:
             # Dummy runs outside the capture window must not touch the
             # piecewise wrappers: capturing is illegal there and replay
@@ -659,9 +669,7 @@ class SparseAttnProposer:
             if builder is not None:
                 break
 
-        assert builder is not None, (
-            "Failed to find attention metadata builder."
-        )
+        assert builder is not None, "Failed to find attention metadata builder."
         return builder
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig):
@@ -693,7 +701,8 @@ class SparseAttnProposer:
         use_cudagraphs: bool = True,
     ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
         cudagraph_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
-            num_tokens=num_tokens, uniform_decode=True)
+            num_tokens=num_tokens, uniform_decode=True
+        )
         num_tokens_padded = batch_desc.num_tokens
 
         # Extra coordination when running data-parallel since we need to
@@ -718,10 +727,9 @@ class SparseAttnProposer:
                 num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
                 # Re-dispatch with DP padding so we have the correct
                 # batch_descriptor
-                cudagraph_mode, batch_desc = \
-                    self.cudagraph_dispatcher.dispatch(
-                        num_tokens_padded, uniform_decode=True
-                    )
+                cudagraph_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
+                    num_tokens_padded, uniform_decode=True
+                )
                 # Assert to make sure the agreed upon token count is correct
                 # otherwise num_tokens_across_dp will no-longer be valid
                 assert batch_desc.num_tokens == num_tokens_padded
