@@ -67,23 +67,38 @@ llm = LLM(
 print(llm.generate(..., SamplingParams(...)))
 ```
 
-Key knobs (`speculative_config`):
+Settings (`speculative_config`):
 
 | Field | Meaning | Default |
 | --- | --- | --- |
-| `sparse_attn_algorithm` | `"vegas"`, `"streamingllm"`, `"coverage"` (attention-mass selection alone), or `"longspec"` (the same plus layer skip masks) | `"streamingllm"` |
-| `sparse_attn_ratio` | Fraction of KV kept for drafting; the cap for `coverage` and `longspec` | `0.05` |
-| `sparse_attn_min_tokens` | Floor on the per-request KV budget | `256` |
-| `num_speculative_tokens` | Draft length per step | / |
-| `sparse_attn_theta` | `coverage`, `longspec`: attention mass each layer's draft must capture | `0.9` |
-| `sparse_attn_sink`, `sparse_attn_recent` | `coverage`, `longspec`: tokens always kept at the start and the end of the scored prefix | `4`, `64` |
-| `sparse_attn_skip_attn_layers`, `sparse_attn_skip_layers` | `longspec` only: layers the draft skips (attention sublayer, or the whole layer with `enforce_eager`) | `[]` |
+| `sparse_attn_algorithm` | `"vegas"`, `"streamingllm"`, or `"coverage"` (top-p on attention weights) | `"streamingllm"` |
+| `sparse_attn_ratio` | Fixed KV fraction for Vegas; selection cap before reserved tokens for coverage | `0.15` for coverage, `0.05` otherwise |
+| `sparse_attn_min_tokens` | Floor on the selection budget | `0` for coverage, `256` otherwise |
+| `num_speculative_tokens` | Draft length per step | Required |
+| `sparse_attn_theta` | Attention-mass target for coverage | `0.85` |
+| `sparse_attn_sink`, `sparse_attn_recent` | Reserved leading and recent scored tokens | `4`, `64` |
+| `sparse_attn_draft_weights` | Draft checkpoint; the full-precision target still verifies | Target weights |
+| `sparse_attn_collect_stats` | Collect per-layer selection budgets | `False` |
 
-`coverage` and `longspec` are our method: per-layer, per-request budgets from an
-attention-mass target instead of one global ratio, and for `longspec` the layer
-skip masks on top. Design and results in `notes/DrafterGoesBurrrr.md`; code under
-`vllm/v1/spec_decode/sparse_attn/longspec/`; grid runner in
-`benchmarks/longspec/grid.py`.
+Our method uses the existing `coverage` setting with a W4A16 draft copy.
+The setting is not a method name. See [Method.md](notes/Method.md).
+The LongBench v2 runner supplies the matching 4-bit checkpoint for Qwen3-4B
+or Qwen3-8B and the Vegas baseline's 7% budget:
+
+```bash
+# Inside a Slurm GPU allocation; cells run serially.
+.venv/bin/python benchmarks/longspec/grid.py --out outputs/runs/<run> \
+    --cells 32768:1:dense,32768:1:vegas,32768:1:coverage
+```
+
+Defaults: eight questions, batch 1, at most 512 generated tokens, stopping
+at EOS. Decode timing uses first/last token timestamps from one generation.
+Output comparisons report divergence separately; controlled tests still
+check equality. `--draft-weights target` selects an unquantized draft for
+agreement experiments. `w4_agreement.py --tokens <grid-token-file> --ctx <n>
+--model <dense-target> --out <run>` rescores continuations on the same text
+prefixes and reports disagreement bounds per 1000 tokens, with tied top
+scores counted separately. This does not measure draft acceptance.
 
 The top-k ranking metric (`"logit"` raw scores vs `"weight"` rematerialized
 softmax weights) is a class-level `SCORE_MODE` toggle on `VegasAttnOverrider`.
@@ -147,11 +162,21 @@ inspects the loaded kernel):
 
 Both can be forced through `speculative_config`: `sparse_attn_score_source`
 (`auto`, `kernel`, `recompute`) and `sparse_attn_draft_kv` (`auto`,
-`token_pages`, `gather`). Selection semantics are identical across strategies;
-acceptance matches the kernel path. The recompute costs one extra read of K per
-verify pass. Their JIT top-k kernel needs `ninja` and `nvcc` on `PATH`.
+`token_pages`, `gather`). Both strategies implement the same selection rules.
+FA2 has been tested on RTX 3090; FA3 acceptance has not been checked after this
+cleanup. Recomputing scores costs one extra read of K per verify pass. The
+JIT top-k kernel needs `ninja` and `nvcc` on `PATH`.
 
-Tests: `pytest tests/v1/spec_decode/sparse_attn/longspec/` (the kernel tests need a GPU).
+Run the unit and kernel tests inside a Slurm GPU allocation:
+
+```bash
+export PATH="$PWD/.venv/bin:/usr/local/cuda/bin:$PATH" CUDA_HOME=/usr/local/cuda
+.venv/bin/python -m pytest --confcutdir=tests/v1/spec_decode/sparse_attn/longspec \
+    tests/v1/spec_decode/sparse_attn/longspec -m 'not slow_test' -q
+```
+
+Omit `-m 'not slow_test'` to include the three model integration tests. Model
+weights load from the node's local Hugging Face cache, never from `/shared`.
 
 ## Citation
 
