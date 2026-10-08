@@ -7,7 +7,7 @@ the target's Attention instances. Those instances are grafted into the
 loaded copy, and its own attention registrations are removed before KV
 sizing, so the copy contributes only decoder projections and norms.
 Embeddings and lm_head are shared with the target; both are unquantized
-in W4A16 checkpoints of the same base model.
+in the supported INT4 and NVFP4 checkpoints of the same base model.
 """
 
 from dataclasses import replace

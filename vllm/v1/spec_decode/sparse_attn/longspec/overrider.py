@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Top-p draft attention; full-cache verification. See notes/Method.md.
+"""Selected-cache draft attention; full verification by default. See notes/Method.md.
 
 The last verify layer selects for all layers and requests in one launch.
 The draft gathers the selection once per round, then appends each new token.
@@ -18,6 +18,7 @@ from .kernels.slot_table import index_to_slots
 from .portable.draft_kv import build_draft_kv
 from .portable.kernel_support import flash_attn_version
 from .portable.score_collection import build_score_collector
+from .sparse_verifier import SparseVerifier
 from .stats import SelectionStats
 from .verify_attention import (
     packed_verify_attention,
@@ -52,6 +53,13 @@ class LongSpecAttnOverrider(BaseAttnOverrider):
         self.max_blocks = (self._width + self.block_size - 1) // self.block_size
 
         fa_version = flash_attn_version()
+        if spec.sparse_attn_verify_ratio < 1 and fa_version != 4:
+            raise ValueError("approximate sparse verification currently requires FA4")
+        self._sparse_verifier = (
+            SparseVerifier(layers, batch, max_len, num_query_heads,
+                           self.num_spec_tokens + 1, spec, device)
+            if spec.sparse_attn_verify_ratio < 1 else None
+        )
         num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         # FA3's scheduler packs GQA on its own; FA2 only at one query.
         self._group = num_query_heads // num_kv_heads
@@ -77,8 +85,9 @@ class LongSpecAttnOverrider(BaseAttnOverrider):
             model_config.dtype,
         )
         logger.info(
-            "Top-p draft on FA%d: p %.3f, cap %.3f; scores %s, draft KV %s",
+            "Draft on FA%d: fixed budget %s, p %.3f, ratio %.3f; scores %s, KV %s",
             fa_version,
+            spec.sparse_attn_fixed_budget,
             spec.sparse_attn_theta,
             spec.sparse_attn_ratio,
             type(self._scores).__name__,
@@ -103,6 +112,9 @@ class LongSpecAttnOverrider(BaseAttnOverrider):
         )
         self._metadata_initialized = False
         self.batch_size = 0
+        # Set only while capturing a confirmed complete speculative round.
+        # Query length alone cannot distinguish a short prefill chunk.
+        self.in_sparse_verify = False
 
         # Compile the selection kernel now, outside any graph capture.
         mass_select(
@@ -120,11 +132,16 @@ class LongSpecAttnOverrider(BaseAttnOverrider):
     # ---- model hooks -----------------------------------------------------
 
     def stats(self) -> dict:
-        return self._stats.snapshot() if self._stats is not None else {}
+        result = self._stats.snapshot() if self._stats is not None else {}
+        if self._sparse_verifier is not None:
+            result["sparse_verifier"] = self._sparse_verifier.stats()
+        return result
 
     def reset_stats(self) -> None:
         if self._stats is not None:
             self._stats.reset()
+        if self._sparse_verifier is not None:
+            self._sparse_verifier.counters.zero_()
 
     # ---- verify ----------------------------------------------------------
 
@@ -135,7 +152,13 @@ class LongSpecAttnOverrider(BaseAttnOverrider):
 
     def _verify_attention(self, *args, **kwargs):
         layer = self.curr_layer
+        verifier = self._sparse_verifier
+        sparse = (
+            self.in_sparse_verify and verifier is not None and verifier.eligible(kwargs)
+        )
         if layer == 0:
+            if sparse:
+                verifier.prepare(kwargs, self._metric)
             self._begin_verify(kwargs)
         batch = self.batch_size
 
@@ -146,22 +169,36 @@ class LongSpecAttnOverrider(BaseAttnOverrider):
                 BaseAttnOverrider._original_attn_func, kwargs
             )
         else:
-            out, lse = BaseAttnOverrider._original_attn_func(*args, **kwargs)
+            attention_kwargs = (
+                verifier.attention_kwargs(kwargs, layer) if sparse else kwargs
+            )
+            out, lse = BaseAttnOverrider._original_attn_func(*args, **attention_kwargs)
+        selected_scores = sparse and verifier.selected_scores
+        if sparse and not selected_scores:
+            lse = verifier.full_lse(kwargs)
         scale = kwargs.get("softmax_scale")
         if scale is None:
             scale = kwargs["q"].shape[-1] ** -0.5
-        self._scores.reduce(
-            kwargs=kwargs,
-            lse=lse,
-            softmax_scale=scale,
-            valid_lens=self._valid_lens[:batch],
-            reduce_entry=self._reduce_entry[:batch],
-            output=self._metric[layer, :batch],
-            use_weight=True,
-        )
+        if selected_scores:
+            verifier.refresh_selected(
+                kwargs, layer, lse, self._valid_lens[:batch],
+                self._reduce_entry[:batch], self._metric[layer, :batch],
+            )
+        else:
+            self._scores.reduce(
+                kwargs=kwargs,
+                lse=lse,
+                softmax_scale=scale,
+                valid_lens=self._valid_lens[:batch],
+                reduce_entry=self._reduce_entry[:batch],
+                output=self._metric[layer, :batch],
+                use_weight=True,
+            )
 
         if layer == self.num_layers - 1:
             self._select()
+            if verifier is not None:
+                verifier.remember(kwargs, self._valid_lens)
         return out
 
     def _begin_verify(self, kwargs: dict) -> None:
@@ -187,10 +224,21 @@ class LongSpecAttnOverrider(BaseAttnOverrider):
         k_max = torch.ceil(seqlens_k * spec.sparse_attn_ratio).int()
         k_max.clamp_(min=spec.sparse_attn_min_tokens, max=self.max_tokens)
         k_max.clamp_max_(valid)
+        if spec.sparse_attn_fixed_budget:
+            # mass_select's bounds count non-reserved tokens. Subtract the
+            # disjoint reserved ranges so the requested ratio includes them.
+            reserved = valid.clamp_max(spec.sparse_attn_sink)
+            reserved += (valid - reserved).clamp_max(spec.sparse_attn_recent)
+            total = torch.ceil(valid * spec.sparse_attn_ratio).int()
+            total.clamp_(min=spec.sparse_attn_min_tokens)
+            k_max = (total - reserved).clamp_(min=0, max=self.max_tokens)
+            k_min = k_max
+        else:
+            k_min = valid.clamp_max(spec.sparse_attn_min_tokens)
         self._k_max.zero_()
         self._k_max[:batch] = k_max
         self._k_min.zero_()
-        self._k_min[:batch] = valid.clamp_max(spec.sparse_attn_min_tokens)
+        self._k_min[:batch] = k_min
         self._metadata_initialized = False
 
     def _select(self) -> None:

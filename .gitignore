@@ -220,6 +220,7 @@ hip_compat.h
 
 # Benchmark dataset
 benchmarks/**/*.json
+!benchmarks/longspec/development_ids.json
 
 # Linting
 actionlint

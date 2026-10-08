@@ -158,6 +158,7 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.sparse_attn import SparseAttnProposer
+from vllm.v1.spec_decode.sparse_attn.proposer import DenseDecodeGraphs
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
@@ -710,7 +711,8 @@ class GPUModelRunner(
 
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
-        self._sparse_graph_sampler_output: SamplerOutput | None = None
+        self._decode_graph_sampler_output: SamplerOutput | None = None
+        self.dense_decode_graphs: DenseDecodeGraphs | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
         self.layerwise_nvtx_hooks_registered = False
@@ -2863,9 +2865,9 @@ class GPUModelRunner(
         logits: torch.Tensor | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> SamplerOutput:
-        if self._sparse_graph_sampler_output is not None:
-            output = self._sparse_graph_sampler_output
-            self._sparse_graph_sampler_output = None
+        if self._decode_graph_sampler_output is not None:
+            output = self._decode_graph_sampler_output
+            self._decode_graph_sampler_output = None
             return output
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
@@ -3580,8 +3582,29 @@ class GPUModelRunner(
                     spec_decode_metadata,
                     self.input_batch.sampling_metadata,
                 )
+            if (
+                self.dense_decode_graphs is not None
+                and cudagraph_mode == CUDAGraphMode.FULL
+                and num_tokens_unpadded == num_tokens_padded == num_reqs
+                and max_num_scheduled_tokens == 1
+                and input_ids is not None
+                and inputs_embeds is None
+                and not self.num_prompt_logprobs
+                and not self.discard_request_mask.np[:num_reqs].any()
+                and not envs.VLLM_COMPUTE_NANS_IN_LOGITS
+                and not any(
+                    self.requests[req_id].sampling_params.structured_outputs is not None
+                    for req_id in self.input_batch.req_ids
+                )
+            ):
+                captured = self.dense_decode_graphs.replay(
+                    input_ids,
+                    positions,
+                    attn_metadata,
+                    self.input_batch.sampling_metadata,
+                )
             if captured is not None:
-                model_output, self._sparse_graph_sampler_output = captured
+                model_output, self._decode_graph_sampler_output = captured
             else:
                 model_output = self._model_forward(
                     input_ids=input_ids,
@@ -3618,8 +3641,8 @@ class GPUModelRunner(
                         kv_connector_output,
                     )
 
-                if self._sparse_graph_sampler_output is not None:
-                    # Uniform greedy verification already projected and sampled
+                if self._decode_graph_sampler_output is not None:
+                    # The complete decode graph already projected and sampled
                     # every row inside its graph. No logits leave that graph.
                     sample_hidden_states = hidden_states
                     logits = None
@@ -4262,6 +4285,8 @@ class GPUModelRunner(
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
                     )
+                if DenseDecodeGraphs.supported(self):
+                    self.dense_decode_graphs = DenseDecodeGraphs(self, self.model)
                 if hasattr(self, "drafter"):
                     logger.info_once("Loading drafter model...")
                     self.drafter.load_model(self.model)
@@ -5356,6 +5381,9 @@ class GPUModelRunner(
             if self.speculative_config and \
                     self.speculative_config.method == "sparse_attn":
                 self._capture_drafter_cudagraphs()
+
+            if self.dense_decode_graphs is not None:
+                self.dense_decode_graphs.capture()
 
             torch.cuda.synchronize()
             end_free_gpu_memory = torch.cuda.mem_get_info()[0]

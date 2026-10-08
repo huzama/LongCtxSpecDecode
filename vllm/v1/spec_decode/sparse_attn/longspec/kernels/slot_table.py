@@ -26,6 +26,8 @@ def _index_to_slot_kernel(
     stride_block_table_row,
     stride_used_layer,
     page_size,
+    logical_ptr,
+    KEEP_LOGICAL: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     layer_idx = tl.program_id(0)
@@ -46,6 +48,9 @@ def _index_to_slot_kernel(
         offsets = start + tl.arange(0, BLOCK_SIZE)
         mask = offsets < used
         index = tl.load(row_ptr + offsets, mask=mask)
+        if KEEP_LOGICAL:
+            tl.store(logical_ptr + layer_idx * stride_table_layer
+                     + batch_idx * stride_table_row + offsets, index, mask=mask)
         physical_page = tl.load(bt_row_ptr + index // page_size, mask=mask)
         slot = physical_page * page_size + index % page_size
         tl.store(row_ptr + offsets, slot, mask=mask)
@@ -55,6 +60,9 @@ def _index_to_slot_kernel(
         offsets = start + tl.arange(0, BLOCK_SIZE)
         mask = offsets < num_recent
         index = valid_len + offsets
+        if KEEP_LOGICAL:
+            tl.store(logical_ptr + layer_idx * stride_table_layer
+                     + batch_idx * stride_table_row + used + offsets, index, mask=mask)
         physical_page = tl.load(bt_row_ptr + index // page_size, mask=mask)
         slot = physical_page * page_size + index % page_size
         tl.store(row_ptr + used + offsets, slot, mask=mask)
@@ -67,18 +75,26 @@ def index_to_slots(
     valid_lens: torch.Tensor,   # [B] int32
     seqlens: torch.Tensor,      # [B] int32
     page_size: int,
+    logical_table: torch.Tensor | None = None,
 ) -> None:
     """Rewrite ``table[l, b, :used]`` to slots and append ``[valid, seqlen)``.
 
     Static launch shape from the table view; no host sync, so the call is
     CUDA-graph safe. Rows must be contiguous along the last dimension.
+    If supplied, ``logical_table`` receives the original indices and causal
+    tail in the same launch, using the same shape and strides as ``table``.
     """
     assert table.dim() == 3 and table.stride(2) == 1
     assert used.dim() in (1, 2)
     layers, batch = table.shape[0], table.shape[1]
+    if logical_table is not None:
+        assert logical_table.shape == table.shape
+        assert logical_table.stride() == table.stride()
     stride_used_layer = used.stride(0) if used.dim() == 2 else 0
     _index_to_slot_kernel[(layers, batch)](
         table, block_table, used, valid_lens, seqlens,
         table.stride(0), table.stride(1), block_table.stride(0),
-        stride_used_layer, page_size, BLOCK_SIZE=256,
+        stride_used_layer, page_size,
+        logical_table if logical_table is not None else table,
+        KEEP_LOGICAL=logical_table is not None, BLOCK_SIZE=256,
     )

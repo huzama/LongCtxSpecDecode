@@ -39,12 +39,18 @@ GRID = REPO / "benchmarks/longspec/grid.py"
 def test_dense_output(tmp_path, model, checkpoint, ctx, theta, cap, min_alpha):
     from transformers import AutoTokenizer
 
+    from benchmarks.longspec import grid
+
     # Preserve the original controlled inputs. Synthetic prompts are test
     # fixtures only; the benchmark itself supports LongBench v2 exclusively.
     prompts_dir = tmp_path / "prompts"
-    cache = prompts_dir / model.replace("/", "--") / "42"
+    args = grid.parse_args(["--model", model, "--out", str(tmp_path)])
+    grid.resolve_revision(args)
+    tokenizer = AutoTokenizer.from_pretrained(model, revision=args.revision)
+    cache = (prompts_dir / model.replace("/", "--") / "42"
+             / grid.digest(grid.prompt_protocol(args, tokenizer)))
     cache.mkdir(parents=True)
-    vocab = AutoTokenizer.from_pretrained(model).vocab_size
+    vocab = tokenizer.vocab_size
     for slot in range(2):
         rng = random.Random(42 + slot)
         tokens = [rng.randrange(1000, vocab - 1000) for _ in range(ctx)]
@@ -67,6 +73,8 @@ def test_dense_output(tmp_path, model, checkpoint, ctx, theta, cap, min_alpha):
         "1",
         "--model",
         model,
+        "--revision",
+        args.revision,
         "--draft-weights",
         checkpoint,
         "--gen",

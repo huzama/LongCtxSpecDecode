@@ -167,6 +167,10 @@ class SparseAttnProposer:
         return self._sampled_token_ids[: self.batch_size]
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
+        if self.speculative_config.sparse_attn_verify_ratio < 1 and (
+            self.round_graphs is None or not cudagraph_mode.has_full_cudagraphs()
+        ):
+            raise ValueError("sparse verification requires complete round CUDA graphs")
         if self.round_graphs is not None:
             self.round_graphs.enabled = cudagraph_mode.has_full_cudagraphs()
         # This should be called BEFORE adjust_cudagraph_sizes_for_spec_decode.
@@ -368,8 +372,6 @@ class SparseAttnProposer:
         attn_metadata = attn_metadata_builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0
         )
-        if self._capturing_round:
-            attn_metadata.max_num_splits = 1
         assert isinstance(attn_metadata, self.allowed_attn_types), (
             f"Attention metadata type {type(attn_metadata)} not supported. "
             f"Supported types: {self.allowed_attn_types}"
@@ -626,6 +628,10 @@ class SparseAttnProposer:
         _get_gather_cuda_module()
         if SparseAttnRoundGraphs.supported(self):
             self.round_graphs = SparseAttnRoundGraphs(self, target_model)
+        elif self.speculative_config.sparse_attn_verify_ratio < 1:
+            raise ValueError(
+                "sparse verification requires single-GPU Qwen3 round graphs"
+            )
 
     @torch.inference_mode()
     @_method_wrapper(enter_fn=_enter_propose, exit_fn=_exit_propose)
@@ -782,8 +788,32 @@ def plain_greedy(metadata: SamplingMetadata) -> bool:
     return True
 
 
+def greedy_sampling_metadata(batch, device):
+    from vllm.v1.sample.logits_processor import LogitsProcessors
+
+    empty = torch.empty(0, device=device)
+    return SamplingMetadata(
+        temperature=None,
+        all_greedy=True,
+        all_random=False,
+        top_p=None,
+        top_k=None,
+        generators={},
+        max_num_logprobs=None,
+        no_penalties=True,
+        prompt_token_ids=None,
+        frequency_penalties=empty,
+        presence_penalties=empty,
+        repetition_penalties=empty,
+        output_token_ids=[[] for _ in range(batch)],
+        allowed_token_ids_mask=None,
+        bad_words_token_ids={},
+        logitsprocs=LogitsProcessors(),
+    )
+
+
 class SparseAttnRoundGraphs:
-    """Two complete graphs for plain greedy Qwen3 decode on one FA2 GPU.
+    """Two complete graphs for plain greedy Qwen3 decode on one FA2/FA4 GPU.
 
     Reuse the proposer and rejection sampler. Inputs/outputs live outside the
     graph pool, so replaying the draft cannot overwrite verification results.
@@ -808,10 +838,11 @@ class SparseAttnRoundGraphs:
             and parallel.data_parallel_size == 1
             and parallel.decode_context_parallel_size == 1
             and getattr(parallel, "prefill_context_parallel_size", 1) == 1
+            and not parallel.use_ubatching
             and config.lora_config is None
             and config.kv_transfer_config is None
             and not config.scheduler_config.async_scheduling
-            and flash_attn_version() == 2
+            and flash_attn_version() in (2, 4)
         )
 
     def __init__(self, proposer, target):
@@ -869,7 +900,6 @@ class SparseAttnRoundGraphs:
 
     def _capture_batch(self, batch, pool):
         from vllm.utils.torch_utils import current_stream
-        from vllm.v1.sample.logits_processor import LogitsProcessors
 
         p = self.proposer
         width = p.num_speculative_tokens + 1
@@ -886,40 +916,19 @@ class SparseAttnRoundGraphs:
             block_table_tensor=self.block_table[:batch],
             slot_mapping=self.slots[:batch],
         )
-        empty = torch.empty(0, device=p.device)
-        sampling = SamplingMetadata(
-            temperature=None,
-            all_greedy=True,
-            all_random=False,
-            top_p=None,
-            top_k=None,
-            generators={},
-            max_num_logprobs=None,
-            no_penalties=True,
-            prompt_token_ids=None,
-            frequency_penalties=empty,
-            presence_penalties=empty,
-            repetition_penalties=empty,
-            output_token_ids=[[] for _ in range(batch)],
-            allowed_token_ids_mask=None,
-            bad_words_token_ids={},
-            logitsprocs=LogitsProcessors(),
-        )
+        sampling = greedy_sampling_metadata(batch, p.device)
         query = torch.arange(0, tokens + 1, width, dtype=torch.int32, device=p.device)
-        attention = FlashAttentionMetadata(
+        # Use the target's capture policy, including its attention split settings.
+        verify_common = replace(
+            common,
+            query_start_loc=query,
+            query_start_loc_cpu=query_cpu * width,
             num_actual_tokens=tokens,
             max_query_len=width,
-            query_start_loc=query,
-            max_seq_len=p.max_model_len,
-            seq_lens=self.seq_lens[:batch],
-            block_table=self.block_table[:batch],
             slot_mapping=self.slots[:tokens],
-            use_cascade=False,
-            common_prefix_len=0,
-            cu_prefix_query_lens=None,
-            prefix_kv_lens=None,
-            suffix_kv_lens=None,
-            max_num_splits=1,
+        )
+        attention = p._get_attention_metadata_builder().build_for_cudagraph_capture(
+            verify_common
         )
         indices = torch.arange(tokens, dtype=torch.int32, device=p.device).view(
             batch, width
@@ -958,7 +967,13 @@ class SparseAttnRoundGraphs:
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                 slot_mapping=slots,
             ):
-                hidden = self.target(input_ids=self.ids[:tokens], positions=positions)
+                p.attn_overrider.in_sparse_verify = True
+                try:
+                    hidden = self.target(
+                        input_ids=self.ids[:tokens], positions=positions
+                    )
+                finally:
+                    p.attn_overrider.in_sparse_verify = False
             self.hidden[:tokens].copy_(hidden)
             logits = self.target.compute_logits(hidden)
             spec.draft_token_ids.copy_(
@@ -1080,3 +1095,138 @@ class SparseAttnRoundGraphs:
         self.draft_replays += 1
         self.proposer.batch_size = batch
         return self.proposer.sampled_token_ids
+
+
+class DenseDecodeGraphs:
+    """Capture forward, logits, and greedy selection in one decode graph."""
+
+    @staticmethod
+    def supported(runner):
+        from .longspec.portable.kernel_support import flash_attn_version
+
+        config = runner.vllm_config
+        parallel = config.parallel_config
+        return (
+            config.speculative_config is None
+            and config.model_config.hf_config.model_type == "qwen3"
+            and not config.model_config.enforce_eager
+            and config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            and parallel.tensor_parallel_size == 1
+            and parallel.pipeline_parallel_size == 1
+            and parallel.data_parallel_size == 1
+            and parallel.decode_context_parallel_size == 1
+            and getattr(parallel, "prefill_context_parallel_size", 1) == 1
+            and not parallel.use_ubatching
+            and config.lora_config is None
+            and config.kv_transfer_config is None
+            and not config.scheduler_config.async_scheduling
+            and config.cache_config.cache_dtype == "auto"
+            and flash_attn_version() in (2, 4)
+        )
+
+    def __init__(self, runner, model):
+        self.runner, self.model = runner, model
+        config = runner.vllm_config
+        batch = config.scheduler_config.max_num_seqs
+        self.batch_limit = batch
+        device = runner.device
+        self.ids = torch.zeros(batch, dtype=runner.input_ids.gpu.dtype, device=device)
+        self.positions = torch.zeros(batch, dtype=torch.int64, device=device)
+        self.seq_lens = torch.ones(batch, dtype=torch.int32, device=device)
+        blocks = (
+            config.model_config.max_model_len + config.cache_config.block_size - 1
+        ) // config.cache_config.block_size
+        self.block_table = torch.zeros(batch, blocks, dtype=torch.int32, device=device)
+        self.slots = torch.zeros(batch, dtype=torch.int64, device=device)
+        self.hidden = torch.zeros(
+            batch,
+            config.model_config.get_hidden_size(),
+            dtype=config.model_config.dtype,
+            device=device,
+        )
+        self.sampled = torch.zeros(batch, 1, dtype=torch.int32, device=device)
+        self.graphs = {}
+        self.decode_replays = 0
+
+    @torch.inference_mode()
+    def capture(self):
+        from vllm.platforms import current_platform
+        from vllm.utils.torch_utils import current_stream
+
+        r = self.runner
+        config = r.vllm_config
+        sizes = set(config.compilation_config.cudagraph_capture_sizes or [])
+        sizes = {b for b in sizes if 0 < b <= self.batch_limit}
+        sizes.add(self.batch_limit)
+        names = get_layers_from_vllm_config(config, AttentionLayerBase)
+        for batch in sorted(sizes, reverse=True):
+            attention = FlashAttentionMetadata(
+                num_actual_tokens=batch,
+                max_query_len=1,
+                query_start_loc=torch.arange(
+                    batch + 1, dtype=torch.int32, device=r.device
+                ),
+                max_seq_len=config.model_config.max_model_len,
+                seq_lens=self.seq_lens[:batch],
+                block_table=self.block_table[:batch],
+                slot_mapping=self.slots[:batch],
+                use_cascade=False,
+                common_prefix_len=0,
+                cu_prefix_query_lens=None,
+                prefix_kv_lens=None,
+                suffix_kv_lens=None,
+                max_num_splits=0,
+            )
+            sampling = greedy_sampling_metadata(batch, r.device)
+
+            def decode(batch=batch, attention=attention, sampling=sampling):
+                with set_forward_context(
+                    dict.fromkeys(names, attention),
+                    config,
+                    num_tokens=batch,
+                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                    slot_mapping=dict.fromkeys(names, self.slots[:batch]),
+                ):
+                    hidden = self.model(
+                        input_ids=self.ids[:batch], positions=self.positions[:batch]
+                    )
+                self.hidden[:batch].copy_(hidden)
+                output = r.sampler(self.model.compute_logits(hidden), sampling)
+                self.sampled[:batch].copy_(output.sampled_token_ids)
+
+            for _ in range(max(1, config.compilation_config.cudagraph_num_of_warmups)):
+                decode()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(
+                graph,
+                pool=current_platform.get_global_graph_pool(),
+                stream=current_stream(),
+            ):
+                decode()
+            self.graphs[batch] = (graph, attention, sampling)
+        logger.info(
+            "Captured complete dense decode graphs for batches %s", sorted(self.graphs)
+        )
+
+    def replay(self, input_ids, positions, metadata, sampling):
+        if not isinstance(metadata, dict) or not metadata or not plain_greedy(sampling):
+            return None
+        attention = next(iter(metadata.values()))
+        if not isinstance(attention, FlashAttentionMetadata):
+            return None
+        batch = attention.num_actual_tokens
+        if (
+            batch not in self.graphs
+            or attention.max_query_len != 1
+            or attention.use_cascade
+        ):
+            return None
+        self.ids[:batch].copy_(input_ids[:batch])
+        self.positions[:batch].copy_(positions[:batch])
+        self.seq_lens[:batch].copy_(attention.seq_lens[:batch])
+        source = attention.block_table[:batch, : self.block_table.shape[1]]
+        self.block_table[:batch, : source.shape[1]].copy_(source)
+        self.slots[:batch].copy_(attention.slot_mapping[:batch])
+        self.graphs[batch][0].replay()
+        self.decode_replays += 1
+        return self.hidden[:batch], SamplerOutput(self.sampled[:batch], None)

@@ -14,6 +14,8 @@ Example (inside Slurm):
 """
 
 import argparse
+import hashlib
+import importlib.metadata
 import json
 import os
 import random
@@ -29,11 +31,13 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 MODEL = "Qwen/Qwen3-4B"
-NATIVE_WINDOW = 40960  # Qwen3 max_position_embeddings; beyond it, YaRN
+NATIVE_WINDOW = 32768  # Qwen3 trained context; config's 40960 is not the YaRN base.
+MAX_WINDOW = 131072
 SPEC_MODES = ("vegas", "coverage")
 LONGBENCH2 = "THUDM/LongBench-v2"
-# prompts/0shot_cot.txt of github.com/THUDM/LongBench, verbatim.
-LONGBENCH2_COT = """Please read the following text and answer the questions below.
+DATASET_REVISION = "2b48e494f2c7a2f0af81aae178e05c7e1dde0fe9"
+# Direct-answer protocol, explicitly without Qwen thinking.
+LONGBENCH2_PROMPT = """Please read the following text and answer the questions below.
 
 <text>
 $DOC$
@@ -46,7 +50,7 @@ Choices:
 (C) $C_C$
 (D) $C_D$
 
-Let’s think step by step:"""
+Only give the answer in the form: The correct answer is (A), (B), (C), or (D)."""
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -64,18 +68,50 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     p.add_argument("--mode", choices=("dense",) + SPEC_MODES, default="dense")
     p.add_argument("--model", default=MODEL)
+    p.add_argument(
+        "--revision", help="model/tokenizer commit; resolved once if omitted"
+    )
     p.add_argument("--gen", type=int, default=512, help="maximum generated tokens")
     p.add_argument("--spec-tokens", type=int, default=6)
-    p.add_argument("--ratio", type=float, help="override our cap; Vegas stays at 0.07")
-    p.add_argument("--theta", type=float, help="override the draft top-p default")
+    p.add_argument(
+        "--ratio", type=float, help="override our KV fraction; Vegas stays at 0.07"
+    )
+    p.add_argument(
+        "--theta",
+        type=float,
+        help="attention-mass target; used only with --no-fixed-budget",
+    )
+    p.add_argument(
+        "--fixed-budget",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="our ratio is a fixed total KV budget, including sink/recent tokens",
+    )
+    p.add_argument(
+        "--verify-ratio",
+        type=float,
+        default=1.0,
+        help="historical KV fraction for approximate coverage verification (FA4)",
+    )
     p.add_argument("--min-tokens", type=int, help="override our selection floor")
     p.add_argument(
-        "--draft-weights", help="our draft checkpoint; 'target' uses target weights"
+        "--verify-score-scope",
+        choices=("full", "selected"),
+        default="full",
+        help="refresh scores over full or selected KV during sparse verification",
+    )
+    p.add_argument(
+        "--draft-weights",
+        help="our draft checkpoint; default/'target' shares target weights",
     )
     p.add_argument("--enforce-eager", action="store_true")
+    p.add_argument("--flash-attn-version", type=int, choices=(2, 3, 4))
     p.add_argument("--gpu-mem-util", type=float, default=0.9)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--prompts-dir", default="outputs/prompts")
+    p.add_argument(
+        "--exclude", help="JSON question IDs/manifest to exclude from timing"
+    )
     p.add_argument(
         "--samples",
         type=int,
@@ -84,8 +120,18 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     p.add_argument("--out", required=True, help="run directory")
     args = p.parse_args(argv)
+    if not 0 < args.verify_ratio <= 1:
+        p.error("--verify-ratio must be in (0, 1]")
+    if args.verify_ratio < 1 and args.mode != "coverage" and not args.cells:
+        p.error("--verify-ratio below 1 requires --mode coverage")
+    if args.verify_score_scope == "selected" and (
+        args.verify_ratio == 1 or not args.fixed_budget
+    ):
+        p.error("selected scoring requires --verify-ratio below 1 and fixed budget")
     if min(args.ctx, args.batch, args.gen, args.samples, args.spec_tokens) < 1:
         p.error("context, batch, generation, samples and draft length must be positive")
+    if not args.cells and args.ctx + args.gen > MAX_WINDOW:
+        p.error("prompt + output exceeds Qwen3's validated 131072-token window")
     if not args.cells:
         if args.measurement == "latency" and args.batch != 1:
             p.error("batched runs require --measurement batch")
@@ -259,37 +305,114 @@ def git_sha() -> str:
     ).strip()
 
 
+def digest(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def provenance():
+    versions = {}
+    for name in ("torch", "transformers", "vllm", "flash-attn-4", "triton"):
+        try:
+            versions[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            versions[name] = None
+    diff = subprocess.check_output(["git", "diff", "HEAD", "--", "."])
+    untracked = subprocess.check_output(
+        ["git", "ls-files", "--others", "--exclude-standard"], text=True
+    ).splitlines()
+    return dict(
+        git_sha=git_sha(),
+        versions=versions,
+        dirty_diff_sha256=hashlib.sha256(diff).hexdigest() if diff else None,
+        untracked_sha256={
+            p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
+            for p in untracked
+            if Path(p).is_file()
+        },
+    )
+
+
+def resolve_revision(args):
+    from transformers import AutoConfig
+
+    config = AutoConfig.from_pretrained(args.model, revision=args.revision)
+    if config.model_type != "qwen3":
+        raise ValueError("this benchmark's context policy supports Qwen3 only")
+    args.revision = getattr(config, "_commit_hash", None) or args.revision
+    return config
+
+
+def prompt_protocol(args, tokenizer):
+    return dict(
+        model=args.model,
+        revision=args.revision,
+        dataset=LONGBENCH2,
+        dataset_revision=DATASET_REVISION,
+        seed=args.seed,
+        thinking=False,
+        template=LONGBENCH2_PROMPT,
+        chat_template=tokenizer.chat_template,
+        tokenizer_sha256=digest(tokenizer.get_vocab()),
+        excluded_ids=sorted(question_ids(getattr(args, "exclude", None))),
+    )
+
+
+def question_ids(path):
+    if path is None:
+        return set()
+    data = json.loads(Path(path).read_text())
+    if isinstance(data, dict):
+        data = data["questions"]
+    return {row if isinstance(row, str) else row["id"] for row in data}
+
+
+def load_dataset():
+    from huggingface_hub import hf_hub_download
+
+    return json.loads(
+        Path(
+            hf_hub_download(
+                LONGBENCH2, "data.json", repo_type="dataset", revision=DATASET_REVISION
+            )
+        ).read_text()
+    )
+
+
+def question_text(item):
+    # Format fields before inserting the document; never replace text inside it.
+    text = LONGBENCH2_PROMPT
+    for key, field in (
+        ("$Q$", "question"),
+        ("$C_A$", "choice_A"),
+        ("$C_B$", "choice_B"),
+        ("$C_C$", "choice_C"),
+        ("$C_D$", "choice_D"),
+    ):
+        text = text.replace(key, item[field].strip())
+    return text
+
+
 def _longbench2_slots(
-    tokenizer, n_tokens: int, count: int, seed: int, cache: Path
+    tokenizer, n_tokens: int, count: int, seed: int, cache: Path, excluded=()
 ) -> None:
     """Write `count` LongBench v2 prompts of exactly n_tokens ids, plus an
     index naming the question behind each slot.
 
-    The official chain-of-thought prompt goes into the model's chat template
-    with the default (thinking) mode; the document is cut in the middle, as
-    the official pred.py does. Questions are drawn, seeded, from those whose
+    Thinking is explicitly disabled. Documents are cut in the middle for
+    timing only, never for answer accuracy. Questions are drawn from those whose
     document fills the budget at most twice over, so the cut stays mild;
     longer documents fill any shortfall, shortest first."""
-    from huggingface_hub import hf_hub_download
-
-    items = json.loads(
-        Path(hf_hub_download(LONGBENCH2, "data.json", repo_type="dataset")).read_text()
-    )
+    items = load_dataset()
     rows = []
     for item in items:
-        text = LONGBENCH2_COT
-        for key, field in (
-            ("$Q$", "question"),
-            ("$C_A$", "choice_A"),
-            ("$C_B$", "choice_B"),
-            ("$C_C$", "choice_C"),
-            ("$C_D$", "choice_D"),
-        ):
-            text = text.replace(key, item[field].strip())
+        if item["_id"] in excluded:
+            continue
+        text = question_text(item)
         chat = tokenizer.apply_chat_template(
             [{"role": "user", "content": text}],
             tokenize=False,
             add_generation_prompt=True,
+            enable_thinking=False,
         )
         head, tail = chat.split("$DOC$")
         head_ids = tokenizer(head, add_special_tokens=False).input_ids
@@ -339,8 +462,15 @@ def prompt_count(args) -> int:
 def build_prompts(args) -> list[list[int]]:
     from transformers import AutoTokenizer
 
+    resolve_revision(args)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, revision=args.revision)
+    protocol = prompt_protocol(args, tokenizer)
     cache = (
-        repo_root() / args.prompts_dir / args.model.replace("/", "--") / str(args.seed)
+        repo_root()
+        / args.prompts_dir
+        / args.model.replace("/", "--")
+        / str(args.seed)
+        / digest(protocol)
     )
     cache.mkdir(parents=True, exist_ok=True)
     paths = [
@@ -349,13 +479,18 @@ def build_prompts(args) -> list[list[int]]:
     ]
     if not all(path.exists() for path in paths):
         _longbench2_slots(
-            AutoTokenizer.from_pretrained(args.model),
+            tokenizer,
             args.ctx,
             len(paths),
             args.seed,
             cache,
+            protocol["excluded_ids"],
         )
-    return [json.loads(path.read_text()) for path in paths]
+    (cache / "protocol.json").write_text(json.dumps(protocol, indent=2))
+    prompts = [json.loads(path.read_text()) for path in paths]
+    if any(len(ids) != args.ctx for ids in prompts):
+        raise ValueError("cached prompt length differs from the requested context")
+    return prompts
 
 
 # ---------------------------------------------------------------------------
@@ -364,14 +499,17 @@ def build_prompts(args) -> list[list[int]]:
 
 
 def yarn_factor(ctx: int, gen: int) -> float | None:
+    """Cover prompt plus output with an integer multiple of Qwen3's native window."""
     need = ctx + gen
     if need <= NATIVE_WINDOW:
         return None
     return float(-(-need // NATIVE_WINDOW))  # ceil, as a float
 
 
-def draft_top_p(args) -> float:
-    """--theta, else the engine's default sparse_attn_theta."""
+def draft_top_p(args) -> float | None:
+    """Active attention-mass target, or None for fixed-budget selection."""
+    if args.fixed_budget:
+        return None
     if args.theta is not None:
         return args.theta
     from vllm.config.speculative import SpeculativeConfig
@@ -380,6 +518,8 @@ def draft_top_p(args) -> float:
 
 
 def speculative_config(args) -> dict | None:
+    if args.verify_ratio < 1 and args.mode != "coverage":
+        raise ValueError("sparse verification requires coverage")
     if args.mode == "dense":
         return None
     cfg = {
@@ -396,11 +536,10 @@ def speculative_config(args) -> dict | None:
     ):
         if value is not None:
             cfg[f"sparse_attn_{key}"] = value
-    checkpoint = args.draft_weights
-    if checkpoint is None:
-        if args.model not in ("Qwen/Qwen3-4B", "Qwen/Qwen3-8B"):
-            raise ValueError("set --draft-weights for this model, or use 'target'")
-        checkpoint = f"RedHatAI/{args.model.split('/')[-1]}-quantized.w4a16"
+    cfg["sparse_attn_fixed_budget"] = args.fixed_budget
+    cfg["sparse_attn_verify_ratio"] = args.verify_ratio
+    cfg["sparse_attn_verify_score_scope"] = args.verify_score_scope
+    checkpoint = args.draft_weights or "target"
     if checkpoint != "target":
         cfg["sparse_attn_draft_weights"] = checkpoint
     cfg["sparse_attn_collect_stats"] = True
@@ -411,10 +550,18 @@ def build_engine(args, **overrides):
     """``overrides`` are extra ``LLM`` keyword arguments, applied last."""
     from vllm import LLM
 
+    if args.verify_ratio < 1 and (args.enforce_eager or args.flash_attn_version != 4):
+        raise ValueError("sparse verification requires captured rounds on FA4")
     factor = yarn_factor(args.ctx, args.gen)
+    if args.ctx + args.gen > MAX_WINDOW:
+        raise ValueError("prompt + output exceeds the validated Qwen3 window")
     kwargs = dict(
         model=args.model,
+        revision=args.revision,
+        tokenizer_revision=args.revision,
+        generation_config="vllm",
         dtype="bfloat16",
+        kv_cache_dtype="auto",
         max_num_seqs=args.batch,
         max_model_len=args.ctx + args.gen,
         enable_prefix_caching=False,
@@ -433,20 +580,32 @@ def build_engine(args, **overrides):
         if root not in sys.path:
             sys.path.insert(0, root)
         kwargs["scheduler_cls"] = "benchmarks.longspec.grid.BatchScheduler"
+        # Capacity boundaries can be odd batches. Avoid padding dense decode
+        # past its complete graph, and capture the full verification token count.
+        sizes = {1, args.batch}
+        if args.mode in SPEC_MODES:
+            sizes.add(args.batch * (args.spec_tokens + 1))
+        kwargs["compilation_config"] = {"cudagraph_capture_sizes": sorted(sizes)}
+    if args.measurement == "batch" or args.flash_attn_version is not None:
+        # Keep the attention backend consistent across all compared methods.
+        kwargs["attention_config"] = {
+            "backend": "FLASH_ATTN",
+            "flash_attn_version": args.flash_attn_version or 2,
+        }
     if factor is not None:
         kwargs["hf_overrides"] = {
-            "rope_parameters": yarn_parameters(args.model, factor)
+            "rope_parameters": yarn_parameters(args.model, factor, args.revision)
         }
     kwargs.update(overrides)
     return LLM(**kwargs), factor
 
 
-def yarn_parameters(model: str, factor: float) -> dict:
+def yarn_parameters(model: str, factor: float, revision=None) -> dict:
     """vLLM derives the context limit from ``rope_parameters``; the legacy
     ``rope_scaling`` key is converted before overrides apply and is ignored."""
     from transformers import AutoConfig
 
-    config = AutoConfig.from_pretrained(model)
+    config = AutoConfig.from_pretrained(model, revision=revision)
     theta = getattr(config, "rope_theta", None)
     if theta is None:
         theta = (getattr(config, "rope_parameters", None) or {})["rope_theta"]
@@ -463,11 +622,28 @@ def yarn_parameters(model: str, factor: float) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def generate(llm, prompts, max_tokens: int):
+def sampling_params(max_tokens, *, ignore_eos=False):
     from vllm import SamplingParams
+
+    return SamplingParams(
+        temperature=0.0,
+        top_p=1.0,
+        top_k=-1,
+        min_p=0.0,
+        presence_penalty=0.0,
+        frequency_penalty=0.0,
+        repetition_penalty=1.0,
+        max_tokens=max_tokens,
+        min_tokens=0,
+        ignore_eos=ignore_eos,
+        skip_special_tokens=False,
+    )
+
+
+def generate(llm, prompts, max_tokens: int):
     from vllm.inputs import TokensPrompt
 
-    params = SamplingParams(temperature=0.0, max_tokens=max_tokens, ignore_eos=False)
+    params = sampling_params(max_tokens)
     inputs = [TokensPrompt(prompt_token_ids=ids) for ids in prompts]
     start = time.perf_counter()
     outputs = llm.generate(inputs, params, use_tqdm=False)
@@ -476,18 +652,13 @@ def generate(llm, prompts, max_tokens: int):
 
 
 def generate_batch(llm, prompts, max_tokens, spec_tokens, speculative):
-    from vllm import SamplingParams
     from vllm.inputs import TokensPrompt
     from vllm.sampling_params import RequestOutputKind
 
     if max_tokens < 2:
         raise ValueError("batch measurement needs at least two output tokens")
-    params = SamplingParams(
-        temperature=0,
-        max_tokens=max_tokens,
-        ignore_eos=True,
-        output_kind=RequestOutputKind.CUMULATIVE,
-    )
+    params = sampling_params(max_tokens, ignore_eos=True)
+    params.output_kind = RequestOutputKind.CUMULATIVE
     ids = [str(next(llm.request_counter)) for _ in prompts]
     window = BatchWindow(ids)
     before = after = None
@@ -534,7 +705,15 @@ def _round_graph_stats(worker):
     drafter = getattr(worker.model_runner, "drafter", None)
     graphs = getattr(drafter, "round_graphs", None)
     if graphs is None:
-        return None
+        dense = getattr(worker.model_runner, "dense_decode_graphs", None)
+        return (
+            None
+            if dense is None
+            else {
+                "batches": sorted(dense.graphs),
+                "decode": dense.decode_replays,
+            }
+        )
     return {
         "batches": sorted(graphs.graphs),
         "verify": graphs.verify_replays,
@@ -596,6 +775,9 @@ def _overrider_reset(worker) -> None:
 
 
 def run_cell(args, run_dir: Path) -> list[dict]:
+    token_path = run_dir / f"tokens-{args.mode}-{args.ctx}-{args.batch}.json"
+    if token_path.exists():
+        raise ValueError("cell already has output; use a fresh run directory")
     if args.mode in SPEC_MODES and shutil.which("nvcc") is None:
         raise SystemExit(
             "spec modes need nvcc on PATH: export "
@@ -606,6 +788,9 @@ def run_cell(args, run_dir: Path) -> list[dict]:
     llm, factor = build_engine(args)
     groups = prompt_groups(args, prompts)
     capacity = llm.collective_rpc(_cache_capacity)[0]
+    (run_dir / f"provenance-{args.mode}-{args.ctx}-{args.batch}.json").write_text(
+        json.dumps(provenance(), indent=2)
+    )
     print(json.dumps({"cache_capacity": capacity}), flush=True)
     if args.measurement == "batch":
         generate_batch(
@@ -628,21 +813,20 @@ def run_cell(args, run_dir: Path) -> list[dict]:
         records.append(record)
         tokens.extend(group_tokens)
         token_slots.extend(prompt_slots)
-    payload = (
-        tokens
-        if args.measurement == "latency"
-        else {
-            "tokens": tokens,
-            "prompt_slots": token_slots,
-            "prompt_count": len(prompts),
-            "ctx": args.ctx,
-            "model": args.model,
-            "seed": args.seed,
-        }
-    )
-    (run_dir / f"tokens-{args.mode}-{args.ctx}-{args.batch}.json").write_text(
-        json.dumps(payload)
-    )
+    payload = {
+        "tokens": tokens,
+        "prompts": prompts,
+        "revision": args.revision,
+        "yarn_factor": factor,
+        "thinking": False,
+        "gen": args.gen,
+        "prompt_slots": token_slots,
+        "prompt_count": len(prompts),
+        "ctx": args.ctx,
+        "model": args.model,
+        "seed": args.seed,
+    }
+    token_path.write_text(json.dumps(payload))
     return records
 
 
@@ -659,6 +843,9 @@ def measure(llm, args, prompts, factor, slot) -> tuple[dict, list]:
                 key: getattr(effective, key)
                 for key in (
                     "sparse_attn_ratio",
+                    "sparse_attn_fixed_budget",
+                    "sparse_attn_verify_ratio",
+                    "sparse_attn_verify_score_scope",
                     "sparse_attn_min_tokens",
                     "sparse_attn_theta",
                     "sparse_attn_sink",
@@ -669,7 +856,7 @@ def measure(llm, args, prompts, factor, slot) -> tuple[dict, list]:
         )
     if args.mode == "coverage":
         llm.collective_rpc(_overrider_reset)
-    graph_before = llm.collective_rpc(_round_graph_stats)[0] if spec else None
+    graph_before = llm.collective_rpc(_round_graph_stats)[0]
     if args.measurement == "batch":
         elapsed, outputs, timing, counters = generate_batch(
             llm, prompts, args.gen, args.spec_tokens, spec
@@ -683,6 +870,7 @@ def measure(llm, args, prompts, factor, slot) -> tuple[dict, list]:
         llm.collective_rpc(_overrider_stats)[0] if args.mode == "coverage" else None
     )
     tokens = [list(o.outputs[0].token_ids) for o in outputs]
+    attention = llm.llm_engine.vllm_config.attention_config
     record = {
         "ctx": args.ctx,
         "batch": args.batch,
@@ -691,16 +879,37 @@ def measure(llm, args, prompts, factor, slot) -> tuple[dict, list]:
         "gen": args.gen,
         "spec_tokens": args.spec_tokens,
         "speculative_config": cfg,
+        "approximate_verification": args.verify_ratio < 1,
         "theta": draft_top_p(args) if args.mode == "coverage" else None,
         "enforce_eager": args.enforce_eager,
         "measurement": args.measurement,
         "async_scheduling": False,
+        "attention_backend": (
+            attention.backend.name if attention.backend is not None else None
+        ),
+        "flash_attn_version": attention.flash_attn_version,
         "gpu_memory_utilization": args.gpu_mem_util,
         "ignore_eos": args.measurement == "batch",
         "acceptance_window": "full_batch_decode"
         if args.measurement == "batch"
         else "generation",
         "yarn_factor": factor,
+        "yarn_original_window": NATIVE_WINDOW,
+        "max_model_len": args.ctx + args.gen,
+        "model_revision": getattr(
+            llm.llm_engine.vllm_config.model_config.hf_config,
+            "_commit_hash",
+            args.revision,
+        ),
+        "thinking": False,
+        "temperature": 0.0,
+        "generation_config": "vllm",
+        "prompt_sha256": [digest(p) for p in prompts],
+        "dataset_revision": DATASET_REVISION,
+        "versions": {
+            name: importlib.metadata.version(name)
+            for name in ("torch", "transformers", "vllm")
+        },
         "seed": args.seed,
         "samples": args.samples,
         "slot": slot,
@@ -731,8 +940,11 @@ def measure(llm, args, prompts, factor, slot) -> tuple[dict, list]:
         graph_after = llm.collective_rpc(_round_graph_stats)[0]
         record["round_graphs"] = {
             "captured_batches": graph_after["batches"],
-            "verify_replays": graph_after["verify"] - graph_before["verify"],
-            "draft_replays": graph_after["draft"] - graph_before["draft"],
+            **{
+                f"{key}_replays": graph_after[key] - graph_before[key]
+                for key in graph_after
+                if key != "batches"
+            },
             "window": "whole_generation",
         }
     if budget is not None:
@@ -791,8 +1003,13 @@ def run_cells(args, run_dir: Path) -> int:
             "mode": mode,
             "out": str(run_dir),
         }
+        if mode != "coverage":
+            child.update(verify_ratio=1.0, verify_score_scope="full")
         cmd = [sys.executable, __file__]
         for key, value in child.items():
+            if key == "fixed_budget" and value is False:
+                cmd.append("--no-fixed-budget")
+                continue
             if key == "cells" or value is None or value is False:
                 continue
             cmd.append("--" + key.replace("_", "-"))
@@ -818,6 +1035,7 @@ def main(argv=None) -> int:
     run_dir = Path(args.out)
     run_dir.mkdir(parents=True, exist_ok=True)
     if args.cells:
+        resolve_revision(args)
         (run_dir / "command.txt").write_text(
             shlex.join([sys.executable, *sys.argv]) + "\n"
         )

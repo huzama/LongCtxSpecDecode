@@ -12,12 +12,61 @@ from benchmarks.longspec import grid
 from vllm.config.speculative import SpeculativeConfig
 
 
+@pytest.mark.parametrize("mode", ["dense", "vegas", "coverage"])
+@pytest.mark.parametrize(
+    "ctx,gen,expected_factor",
+    [
+        (16384, 16384, None),
+        (32768, 1, 2.0),
+        (32768, 512, 2.0),
+        (65535, 1, 2.0),
+        (65536, 512, 3.0),
+        (130560, 512, 4.0),
+        (32768, 16384, 2.0),
+        (65536, 16384, 3.0),
+    ],
+)
+def test_engine_yarn_covers_prompt_and_output(
+    monkeypatch, mode, ctx, gen, expected_factor
+):
+    import transformers
+
+    import vllm
+
+    # Qwen3's configured limit must not replace its 32K trained context.
+    monkeypatch.setattr(
+        transformers.AutoConfig,
+        "from_pretrained",
+        lambda model, **kwargs: NS(max_position_embeddings=40960, rope_theta=1000000.0),
+    )
+    monkeypatch.setattr(vllm, "LLM", lambda **kwargs: kwargs)
+    args = grid.parse_args(
+        ["--out", "/tmp/unused", "--mode", mode, "--ctx", str(ctx), "--gen", str(gen)]
+    )
+    engine, factor = grid.build_engine(args)
+    assert factor == expected_factor
+    assert engine["max_model_len"] == ctx + gen
+    if expected_factor is None:
+        assert "hf_overrides" not in engine
+    else:
+        rope = engine["hf_overrides"]["rope_parameters"]
+        assert rope == {
+            "rope_type": "yarn",
+            "factor": expected_factor,
+            "original_max_position_embeddings": 32768,
+            "rope_theta": 1000000.0,
+        }
+        assert rope["factor"] * 32768 >= engine["max_model_len"]
+
+
 def test_mode_defaults():
     args = grid.parse_args(["--out", "/tmp/unused", "--mode", "coverage"])
     assert args.gen == 512 and args.samples == 8
     ours = SpeculativeConfig(**grid.speculative_config(args))
-    assert (ours.sparse_attn_ratio, ours.sparse_attn_min_tokens) == (0.15, 0)
-    assert ours.sparse_attn_draft_weights == "RedHatAI/Qwen3-4B-quantized.w4a16"
+    assert (ours.sparse_attn_ratio, ours.sparse_attn_min_tokens) == (0.07, 0)
+    assert ours.sparse_attn_fixed_budget and grid.draft_top_p(args) is None
+    assert ours.sparse_attn_draft_weights is None
+    assert ours.sparse_attn_verify_score_scope == "full"
     args.mode, args.ratio, args.draft_weights = "vegas", 1, "unused"
     vegas = SpeculativeConfig(**grid.speculative_config(args))
     assert vegas.sparse_attn_ratio == 0.07 and vegas.sparse_attn_draft_weights is None
@@ -208,14 +257,18 @@ def test_capacity_reserves_generation_lookahead_and_null_block(monkeypatch):
 def test_saved_batch_tokens_recover_original_prompt_order(monkeypatch):
     from benchmarks.longspec import w4_agreement
 
-    args = NS(model="test", ctx=32, seed=42)
+    args = NS(model="test", ctx=1, seed=42)
     payload = dict(
         model="test",
-        ctx=32,
+        ctx=1,
         seed=42,
         prompt_count=3,
         prompt_slots=[2, 0, 1, 2],
         tokens=[[7], [8], [9], [10]],
+        prompts=[[1], [2], [3]],
+        revision="frozen",
+        gen=16,
+        yarn_factor=None,
     )
     monkeypatch.setattr(
         w4_agreement.grid, "build_prompts", lambda args: [[1], [2], [3]]
@@ -226,3 +279,91 @@ def test_saved_batch_tokens_recover_original_prompt_order(monkeypatch):
     payload["seed"] = 43
     with pytest.raises(ValueError, match="--seed"):
         w4_agreement.source_prompts(args, payload)
+
+
+def test_rejects_total_context_beyond_validated_window():
+    with pytest.raises(SystemExit):
+        grid.parse_args(["--out", "/tmp/unused", "--ctx", "131072", "--gen", "512"])
+
+
+def test_sampling_is_explicit_greedy_without_penalties():
+    for ignore_eos in (False, True):
+        params = grid.sampling_params(512, ignore_eos=ignore_eos)
+        assert params.temperature == 0 and params.top_p == 1 and params.top_k == 0
+        assert params.min_p == params.min_tokens == 0
+        assert params.presence_penalty == params.frequency_penalty == 0
+        assert params.repetition_penalty == 1 and params.ignore_eos == ignore_eos
+        assert params.max_tokens == 512 and not params.skip_special_tokens
+        params.update_from_generation_config(
+            {"eos_token_id": [151645, 151643]}, model_eos_token_id=151645
+        )
+        assert (151643 in params.stop_token_ids) is not ignore_eos
+
+
+def test_cells_preserve_disabled_budget_and_apply_sparse_options_only_to_ours(
+    tmp_path, monkeypatch
+):
+    args = grid.parse_args(
+        [
+            "--out",
+            str(tmp_path),
+            "--cells",
+            "4096:1:dense,4096:1:coverage",
+            "--no-fixed-budget",
+            "--verify-ratio",
+            ".5",
+        ]
+    )
+    calls = []
+
+    def run(cmd, check):
+        child = grid.parse_args(cmd[2:])
+        calls.append(child)
+        (tmp_path / f"tokens-{child.mode}-4096-1.json").write_text("[[1]]")
+
+    monkeypatch.setattr(grid.subprocess, "run", run)
+    grid.run_cells(args, tmp_path)
+    assert all(not a.fixed_budget for a in calls)
+    assert [a.verify_ratio for a in calls] == [1, 0.5]
+
+
+def test_prompt_identity_includes_thinking_template_revision_and_tokenizer():
+    args = NS(model="Qwen/Qwen3-8B", revision="abc", seed=42)
+    tokenizer = NS(chat_template="template", get_vocab=lambda: {"a": 1})
+    old = grid.prompt_protocol(args, tokenizer)
+    assert old["thinking"] is False and old["dataset_revision"] == grid.DATASET_REVISION
+    args.revision = "def"
+    assert grid.digest(old) != grid.digest(grid.prompt_protocol(args, tokenizer))
+
+
+def test_fixed_budget_cli_and_explicit_attention_mass_mode():
+    args = grid.parse_args(
+        [
+            "--out",
+            "/tmp/unused",
+            "--mode",
+            "coverage",
+            "--fixed-budget",
+            "--ratio",
+            "0.07",
+            "--draft-weights",
+            "target",
+        ]
+    )
+    spec = SpeculativeConfig(**grid.speculative_config(args))
+    assert spec.sparse_attn_fixed_budget and spec.sparse_attn_ratio == 0.07
+    assert spec.sparse_attn_draft_weights is None
+    args = grid.parse_args(
+        [
+            "--out",
+            "/tmp/unused",
+            "--mode",
+            "coverage",
+            "--no-fixed-budget",
+            "--theta",
+            "0.93",
+        ]
+    )
+    spec = SpeculativeConfig(**grid.speculative_config(args))
+    assert not spec.sparse_attn_fixed_budget and spec.sparse_attn_theta == 0.93
+    assert spec.sparse_attn_ratio == 0.15 and grid.draft_top_p(args) == 0.93

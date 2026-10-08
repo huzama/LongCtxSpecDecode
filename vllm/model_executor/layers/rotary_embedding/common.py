@@ -134,7 +134,11 @@ class ApplyRotaryEmb(CustomOp):
         self.enable_fp32_compute = enable_fp32_compute
 
         self.apply_rotary_emb_flash_attn = None
-        if find_spec("flash_attn") is not None:
+        # FA4 provides flash_attn.cute without the older optional rotary ops.
+        if (
+            find_spec("flash_attn") is not None
+            and find_spec("flash_attn.ops") is not None
+        ):
             from flash_attn.ops.triton.rotary import apply_rotary
 
             self.apply_rotary_emb_flash_attn = apply_rotary

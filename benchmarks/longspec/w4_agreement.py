@@ -72,6 +72,10 @@ def summarize(rows) -> dict:
 def source_prompts(args, payload):
     """Recover repeated batch prompts in the order their continuations were saved."""
     if isinstance(payload, dict):
+        if "prompts" not in payload:
+            raise ValueError(
+                "legacy output lacks frozen prompts; use its original runner"
+            )
         for key in ("model", "ctx", "seed"):
             if payload[key] != getattr(args, key):
                 raise ValueError(f"--{key} does not match the saved token file")
@@ -84,13 +88,19 @@ def source_prompts(args, payload):
         ):
             raise ValueError("invalid prompt slots in the token file")
     else:
-        tokens = payload
-        count, slots = len(tokens), list(range(len(tokens)))
+        raise ValueError("legacy output lacks frozen prompts; use its original runner")
     if not tokens or any(not continuation for continuation in tokens):
         raise ValueError("the token file contains no tokens or an empty continuation")
     args.samples, args.batch, args.measurement = count, 1, "latency"
-    args.gen = max(len(t) for t in tokens) + 1
-    pool = grid.build_prompts(args)
+    args.gen = payload["gen"]
+    args.revision = payload["revision"]
+    pool = payload["prompts"]
+    if len(pool) != count or any(len(p) != args.ctx for p in pool):
+        raise ValueError("saved prompts do not match context/pool size")
+    if payload["yarn_factor"] != grid.yarn_factor(args.ctx, args.gen):
+        raise ValueError(
+            "saved YaRN differs from current policy; use its original runner"
+        )
     return [pool[slot] for slot in slots], tokens
 
 
@@ -113,7 +123,16 @@ def main(argv=None) -> int:
         prompts, tokens = source_prompts(args, json.loads(Path(own.tokens).read_text()))
     except ValueError as exc:
         p.error(str(exc))
-    llm, _ = grid.build_engine(args, max_num_batched_tokens=own.score_chunk)
+    # Rescoring asks for one extra token; never change the source's RoPE factor.
+    required = max(len(p) + len(t) + 1 for p, t in zip(prompts, tokens))
+    limit = (grid.yarn_factor(args.ctx, args.gen) or 1) * grid.NATIVE_WINDOW
+    if required > min(limit, grid.MAX_WINDOW):
+        p.error("rescore needs one extra position outside the source's RoPE window")
+    llm, _ = grid.build_engine(
+        args,
+        max_num_batched_tokens=own.score_chunk,
+        max_model_len=max(args.ctx + args.gen, required),
+    )
     start = time.perf_counter()
     record = {
         "model": args.model,

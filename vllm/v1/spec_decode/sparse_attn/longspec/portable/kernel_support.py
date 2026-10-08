@@ -26,7 +26,6 @@ def _op_argument_names(module: str, op: str) -> list[str]:
         return []
 
 
-@cache
 def flash_attn_version() -> int:
     """FlashAttention major version the backend uses on this platform."""
     return get_flash_attn_version() or 2

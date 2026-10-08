@@ -1,66 +1,65 @@
 # Method
 
-Self-speculative decoding at long context: a 4-bit copy drafts from selected
-KV-cache tokens; the BF16 target verifies against the whole cache.
+Approximate self-speculative decoding: one BF16 Qwen3 supplies both draft and
+verifier weights. Keep 7% of draft KV and 50% of verifier history per layer and
+request; refresh attention scores only over retained verifier keys. The 40%
+verifier is an ablation. This trades output fidelity for decode throughput;
+it does not preserve the full-cache target's greedy choices.
 
-## Our method
+## One speculative round
 
-| Part | Rule |
+| Step | Implementation |
 |---|---|
-| Draft | Same model with 4-bit weights and 16-bit activations (W4A16). Draft 6 tokens per round. |
-| Selection | Per layer and request, keep the first 4 and last 64 tokens. Add the highest-attention tokens to reach 85% attention mass, with the additional selection capped at 15% of the cache. |
-| Attention scores | From the previous target verification: average its first and last new token's attention over heads. Update every round. |
-| Verify | The BF16 target checks the drafts against the whole cache. Accept the matching prefix, then emit one target token. |
-| Memory | Retain the target's full KV cache. The extra W4 weights and draft buffers consume GPU memory and can reduce the batch that fits. |
+| Select history | Reuse scores from the preceding verifier, initialized by full-attention prefill. Rank separately per layer/request. Reserve the first 4 and recent 64 positions of the scored prefix. Keep unscored history and the complete causal query tail. Mandatory tokens may exceed the nominal fraction. |
+| Verify | FA4 reads selected entries from the persistent BF16 KV cache using one-token page tables. All model layers and linear projections still run. Recompute the proposed positions' KV with the verifier. |
+| Accept | Greedy comparison accepts the matching draft prefix, then emits a correction or bonus token. Shorten valid cache lengths to discard rejected positions. Acceptance is against this approximate verifier, not the dense target. |
+| Refresh scores | Recompute first/last verifier-query QK products only for retained keys; normalize with sparse FA4 log-sum-exp. Average over query heads and those queries, store BF16 scores at original token positions. Unselected positions receive -1, below even zero attention weight. Score only positions visible to the first query. |
+| Draft | A batched radix-selection kernel selects fixed 7% independently for every layer/request. Gather selected verifier KV once, then generate 6 draft tokens, appending each new KV entry. Keep original rotary positions. |
 
-Full-cache verification preserves the target's greedy decoding rule. Different
-batch shapes can still change floating-point results and token choices. Check
-agreement by rescoring the same text prefixes with dense attention, reporting
-ties for the highest score separately.
+The next correction/bonus token has no verifier KV yet. Its draft KV is temporary
+until the next verification replaces it. Accepted KV is verifier-generated, but
+after sparse verification it can differ from KV produced by full-cache decoding.
+A full-attention fallback refreshes scores; it does not reconstruct earlier dense KV.
 
-Experiment setup, batch selection, baselines, and result tables are in
-[experiments.md](experiments.md).
+No periodic full-key scan runs during sparse verification. Omitted history can
+re-enter after a full-attention fallback. Prefill, incomplete rounds, and other
+unsupported shapes use full attention. Sparse verification is admitted only in
+the captured complete-round path, so a short prefill cannot trigger it by shape.
+Reserved recency applies to the known scored prefix; newer unscored positions
+are additionally retained.
 
-### TODO next: sparse verification
+## Execution and controls
 
-Planned extension of our method; not yet implemented. Verify against a larger
-cache selection than the draft uses. Accept only when the score gap between the top two choices exceeds a
-threshold; otherwise use full-cache verification. Refresh the selection with
-periodic full-cache passes. The selection size, score threshold, and refresh
-interval remain undecided. Sparse verification can change target outputs and requires
-measuring disagreements against dense attention.
+- B200, FA4, BF16 weights/activations/KV; no extra draft weights. Full KV remains
+  allocated. Sparsity reduces attention reads, not the persistent KV allocation.
+- One verifier CUDA graph and one graph for all 6 drafts per complete round.
+  Each graph contains multiple kernels. CPU staging, scheduling and result
+  transfer remain outside; graph counters cover the whole generation.
+- Our draft ratio includes reserved tokens. The unchanged Vegas selector uses
+  a 7% non-reserved top-k budget plus sink/recent tokens and a 256-token floor.
+  Report actual retained fractions; these budgets are not exactly identical.
+- Plain greedy, thinking off, temperature 0, no penalties or logit processors.
+  This is a controlled decoding protocol, not Qwen's recommended sampled quality
+  configuration. Prefill and full verification remain available as controls.
+- Qwen3 native context: 32,768 **input plus output** tokens. Above it, static YaRN
+  uses original window 32,768 and factor ceil(total budget / 32,768). Cap total
+  length at the documented 131,072-token range. Selection never renumbers positions.
 
-## Technical details
-
-Current A6000 implementation (FlashAttention 2):
-
-| What | How |
-|---|---|
-| Load the draft | Load the matching W4A16 checkpoint. Share the target's embeddings, output head, and attention modules; retain separate draft projections and norms. |
-| Multiply quantized weights | Marlin reads packed weights and reconstructs approximate BF16 values in registers using scales and zero points. BF16 multiplies accumulate in FP32 within the same kernel; no full BF16 draft-weight copy is stored. |
-| Obtain attention scores | A Triton kernel rereads cached keys, computes the selected verification queries' dot products, and normalizes with FlashAttention's log-sum-exp. Reduce over queries and heads into one BF16 score per cached token. |
-| Select cache entries | One CUDA block per layer/request finds the score threshold by radix selection. Reserved tokens count toward the 85% mass target; the 15% additional-token cap can prevent reaching it. Convert selected token indices to physical KV slots. |
-| Read KV during drafting | Gather selected target KV and the new tail into per-layer BF16 buffers on the first draft step. Later steps append only the newest KV entry. Keep original token positions for rotary embeddings. |
-| Verify and discard rejected drafts | The target recomputes the draft positions with full-cache attention, replacing their temporary draft KV. Accept the matching prefix; shorten the valid sequence length to exclude rejected positions. |
-| CUDA graphs | Replay one verifier graph (forward, logits, acceptance, cache selection, next-input preparation), then one graph containing all 6 draft steps and sampling. The first draft gathers the selected KV; later drafts append inside the same graph. No CPU token readback between drafts. |
-| Account for memory | Allocate draft buffers before vLLM sizes the target KV pool, so the extra weights and buffers reduce available cache capacity. |
-
-Each draft step generates all 6 proposed tokens with **one CUDA graph launch**.
-Each verification step checks those tokens with **one CUDA graph launch**.
-A complete round contains one step of each kind.
-
-This applies to greedy Qwen3 runs on one GPU using FlashAttention 2, for batch
-sizes captured at startup and requests with all 6 drafts available to verify.
-Other configurations use the existing execution path. The CPU still prepares
-inputs, schedules requests, and receives outputs. GPU validation is pending.
+Use `--mode coverage --draft-weights target --fixed-budget --ratio .07
+--verify-ratio .5 --verify-score-scope selected --flash-attn-version 4` in the
+benchmark. For controls, set verifier ratio 1 and scoring scope `full`; 50% with
+`full` scoring isolates the cost of full-key score refresh. Engine defaults retain
+full verification; paper runs explicitly select the approximate method.
 
 ## What we tried and dropped
 
-| Approach | Outcome |
+| Approach | Decision |
 |---|---|
-| Activation sparsity | Rejected. At 50% / 70% sparsity, same-prefix agreement was 89.26% / 74.02%, versus dense 99.41% (Qwen3-4B, 32K, A100). |
-| Static layer and attention skipping | Code removed; no measured speed benefit recorded. |
-| Early exit, draft trees, copy drafting, dynamic draft length, budget-driven attention skipping | Plans dropped; no recorded results. |
-| FlashAttention automatic KV splitting | Deferred. Qwen3-0.6B full-cache verification: acceptance 0.946, below the required 0.98. |
+| Quantized drafts | Keep shared BF16 weights. Quantization added draft disagreement in development checks. Optional checkpoints remain supported outside the paper method. |
+| Attention-mass selection | Keep fixed 7%. A threshold on averaged past attention did not preserve future draft choices; a larger minimum KV budget recovered the measured deficit. |
+| Full-key sparse score refresh | Retain as an ablation. Its extra full-key normalization/scoring scans largely removed the attention-read savings. |
+| Activation sparsity, static skipping | Dropped after disagreement or no demonstrated speed benefit. |
+| Early exit, trees, copy drafting, dynamic draft length | Not part of this implementation. |
 
-Historical checks, not final LongBench results.
+[Experiments](experiments.md) defines the protocol, pending paper tables and
+separately labelled development evidence. No corrected paper results exist yet.

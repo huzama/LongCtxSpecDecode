@@ -162,14 +162,32 @@ class SpeculativeConfig:
 
     # Self-speculative decoding with sparse attention
     sparse_attn_algorithm: Literal["streamingllm", "vegas", "coverage"] = "streamingllm"
-    """Draft KV selection. The existing coverage setting selects by attention mass."""
+    """Draft KV selection. Coverage defaults to a fixed total cache budget."""
 
     sparse_attn_ratio: float | None = Field(default=None, gt=0, le=1)
-    """Draft KV fraction. Default: cap 0.15 for coverage, fixed 0.05 otherwise.
-    Reserved sink and recent tokens are additional to the coverage cap."""
+    """Draft KV fraction. Coverage defaults to fixed 0.07, or cap 0.15 when
+    attention-mass selection is enabled; other algorithms default to 0.05.
+    Reserved sink/recent tokens are additional to the coverage cap, or included
+    in the ratio when sparse_attn_fixed_budget is enabled."""
 
     sparse_attn_min_tokens: int | None = Field(default=None, ge=0)
     """Draft KV floor. Default: 0 for coverage, 256 otherwise."""
+
+    sparse_attn_fixed_budget: bool | None = None
+    """Default on for coverage, off otherwise. Use a fixed prefix budget including
+    sink/recent tokens. Mandatory tokens can exceed the budget on short prefixes.
+    The attention-mass threshold is ignored in this mode."""
+
+    sparse_attn_verify_ratio: float = Field(default=1.0, gt=0, le=1)
+    """Historical KV fraction for approximate coverage verification on FA4.
+    Default 1 keeps full verification. Prefill and ragged query blocks stay full.
+    Values below 1 can change target choices and subsequent KV states."""
+
+    sparse_attn_verify_score_scope: Literal["full", "selected"] = "full"
+    """Selection-score refresh during sparse verification. 'selected' reuses
+    sparse attention's normalization and scores only retained KV. Omitted
+    history cannot re-enter until a full-attention fallback refreshes scores.
+    Requires sparse verification and fixed-budget draft selection."""
 
     sparse_attn_theta: float = Field(default=0.85, gt=0, le=1)
     """Coverage attention-mass target, including reserved sink and recent tokens."""
@@ -220,6 +238,20 @@ class SpeculativeConfig:
         # The draft weight copy is compiled as its own module; its
         # quantization scheme changes that graph's structure.
         factors.append(self.sparse_attn_draft_weights)
+        factors.append(self.sparse_attn_verify_ratio)
+        factors.append(self.sparse_attn_verify_score_scope)
+        if self.method == "sparse_attn":
+            factors.extend(
+                getattr(self, name)
+                for name in (
+                    "num_speculative_tokens", "sparse_attn_algorithm",
+                    "sparse_attn_ratio", "sparse_attn_fixed_budget",
+                    "sparse_attn_min_tokens", "sparse_attn_theta",
+                    "sparse_attn_sink", "sparse_attn_recent",
+                    "sparse_attn_score_source", "sparse_attn_draft_kv",
+                    "sparse_attn_collect_stats",
+                )
+            )
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
@@ -326,10 +358,23 @@ class SpeculativeConfig:
         return hf_config
 
     def __post_init__(self):
-        if self.sparse_attn_ratio is None:
-            self.sparse_attn_ratio = (
-                0.15 if self.sparse_attn_algorithm == "coverage" else 0.05
+        if self.sparse_attn_verify_ratio < 1 and (
+            self.method != "sparse_attn" or self.sparse_attn_algorithm != "coverage"
+        ):
+            raise ValueError("sparse verification requires sparse_attn coverage")
+        if self.sparse_attn_fixed_budget is None:
+            self.sparse_attn_fixed_budget = self.sparse_attn_algorithm == "coverage"
+        if self.sparse_attn_verify_score_scope == "selected" and (
+            self.sparse_attn_verify_ratio == 1 or not self.sparse_attn_fixed_budget
+        ):
+            raise ValueError(
+                "selected scoring requires sparse verification and fixed budget"
             )
+        if self.sparse_attn_ratio is None:
+            if self.sparse_attn_algorithm == "coverage":
+                self.sparse_attn_ratio = 0.07 if self.sparse_attn_fixed_budget else 0.15
+            else:
+                self.sparse_attn_ratio = 0.05
         if self.sparse_attn_min_tokens is None:
             self.sparse_attn_min_tokens = (
                 0 if self.sparse_attn_algorithm == "coverage" else 256
