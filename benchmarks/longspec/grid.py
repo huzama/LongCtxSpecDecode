@@ -104,6 +104,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--draft-weights",
         help="our draft checkpoint; default/'target' shares target weights",
     )
+    p.add_argument(
+        "--draft-weights-scope",
+        choices=("all", "ffn", "gate_up", "down"), default="all",
+        help="quantize all draft projections, FFNs, gate/up, or down only",
+    )
     p.add_argument("--enforce-eager", action="store_true")
     p.add_argument("--flash-attn-version", type=int, choices=(2, 3, 4))
     p.add_argument("--gpu-mem-util", type=float, default=0.9)
@@ -120,6 +125,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     p.add_argument("--out", required=True, help="run directory")
     args = p.parse_args(argv)
+    if args.draft_weights_scope != "all" and (
+        args.draft_weights in (None, "target")
+        or (args.mode != "coverage" and not args.cells)
+    ):
+        p.error("FFN-only drafting requires coverage and an INT4 draft checkpoint")
     if not 0 < args.verify_ratio <= 1:
         p.error("--verify-ratio must be in (0, 1]")
     if args.verify_ratio < 1 and args.mode != "coverage" and not args.cells:
@@ -542,6 +552,7 @@ def speculative_config(args) -> dict | None:
     checkpoint = args.draft_weights or "target"
     if checkpoint != "target":
         cfg["sparse_attn_draft_weights"] = checkpoint
+        cfg["sparse_attn_draft_weights_scope"] = args.draft_weights_scope
     cfg["sparse_attn_collect_stats"] = True
     return cfg
 
@@ -851,6 +862,7 @@ def measure(llm, args, prompts, factor, slot) -> tuple[dict, list]:
                     "sparse_attn_sink",
                     "sparse_attn_recent",
                     "sparse_attn_draft_weights",
+                    "sparse_attn_draft_weights_scope",
                 )
             }
         )
@@ -1004,7 +1016,8 @@ def run_cells(args, run_dir: Path) -> int:
             "out": str(run_dir),
         }
         if mode != "coverage":
-            child.update(verify_ratio=1.0, verify_score_scope="full")
+            child.update(verify_ratio=1.0, verify_score_scope="full",
+                         draft_weights_scope="all")
         cmd = [sys.executable, __file__]
         for key, value in child.items():
             if key == "fixed_budget" and value is False:

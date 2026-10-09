@@ -219,6 +219,10 @@ class SpeculativeConfig:
     shared, and draft activations and KV writes stay in the target dtype.
     None drafts with the target weights."""
 
+    sparse_attn_draft_weights_scope: Literal["all", "ffn", "gate_up", "down"] = "all"
+    """Use all decoder weights, INT4 FFNs, or only gate/up or down projections.
+    The FFN-only mode shares the BF16 target's attention and norms."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -238,6 +242,7 @@ class SpeculativeConfig:
         # The draft weight copy is compiled as its own module; its
         # quantization scheme changes that graph's structure.
         factors.append(self.sparse_attn_draft_weights)
+        factors.append(self.sparse_attn_draft_weights_scope)
         factors.append(self.sparse_attn_verify_ratio)
         factors.append(self.sparse_attn_verify_score_scope)
         if self.method == "sparse_attn":
@@ -358,6 +363,12 @@ class SpeculativeConfig:
         return hf_config
 
     def __post_init__(self):
+        if self.sparse_attn_draft_weights_scope != "all" and (
+            self.method != "sparse_attn" or not self.sparse_attn_draft_weights
+        ):
+            raise ValueError(
+                "FFN-only drafting requires a sparse_attn draft checkpoint"
+            )
         if self.sparse_attn_verify_ratio < 1 and (
             self.method != "sparse_attn" or self.sparse_attn_algorithm != "coverage"
         ):

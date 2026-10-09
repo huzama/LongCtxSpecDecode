@@ -74,6 +74,22 @@ def test_mode_defaults():
     assert grid.speculative_config(args) is None
 
 
+@pytest.mark.parametrize("scope", ["ffn", "gate_up", "down"])
+def test_ffn_only_draft_options(scope):
+    args = grid.parse_args([
+        "--out", "/tmp/unused", "--mode", "coverage",
+        "--draft-weights", "/local/pinned-int4", "--draft-weights-scope", scope,
+    ])
+    spec = SpeculativeConfig(**grid.speculative_config(args))
+    assert spec.sparse_attn_draft_weights_scope == scope
+    assert spec.sparse_attn_verify_ratio == 1
+    for extra in ([], ["--draft-weights", "target"],
+                  ["--mode", "dense", "--draft-weights", "int4"]):
+        with pytest.raises(SystemExit):
+            grid.parse_args(["--out", "/tmp/unused",
+                             "--draft-weights-scope", scope, *extra])
+
+
 def output(first, last, tokens, request_id="a", finished=False):
     return NS(
         request_id=request_id,
@@ -103,7 +119,8 @@ def test_comparison_handles_prefixes_and_lengths():
         grid.compare_tokens([[1]], [])
 
 
-def test_cells_use_parsed_options(tmp_path, monkeypatch):
+@pytest.mark.parametrize("scope", ["all", "ffn", "gate_up", "down"])
+def test_cells_use_parsed_options(tmp_path, monkeypatch, scope):
     args = grid.parse_args(
         [
             "--out",
@@ -113,7 +130,8 @@ def test_cells_use_parsed_options(tmp_path, monkeypatch):
             "--measurement=batch",
             "--samples=1",
             "--cells=4096:2:dense,4096:2:coverage",
-            "--draft-weights=target",
+            "--draft-weights=" + ("target" if scope == "all" else "int4"),
+            "--draft-weights-scope=" + scope,
         ]
     )
     calls = []
@@ -122,6 +140,8 @@ def test_cells_use_parsed_options(tmp_path, monkeypatch):
         child = grid.parse_args(cmd[2:])
         calls.append(child)
         assert check and child.ctx == 4096 and child.batch == 2 and child.cells is None
+        expected_scope = scope if child.mode == "coverage" else "all"
+        assert child.draft_weights_scope == expected_scope
         (tmp_path / f"tokens-{child.mode}-4096-2.json").write_text(
             json.dumps([[1], [2]])
         )

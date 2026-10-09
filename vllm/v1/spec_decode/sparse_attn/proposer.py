@@ -602,7 +602,10 @@ class SparseAttnProposer:
         if draft_weights is not None:
             from vllm.v1.spec_decode.sparse_attn.draft_weights import load_draft_model
 
-            self.model = load_draft_model(self.vllm_config, target_model, draft_weights)
+            self.model = load_draft_model(
+                self.vllm_config, target_model, draft_weights,
+                scope=self.speculative_config.sparse_attn_draft_weights_scope,
+            )
         else:
             self.model = target_model
 

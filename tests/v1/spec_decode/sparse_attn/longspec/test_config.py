@@ -55,6 +55,114 @@ def test_explicit_budget():
     assert spec.sparse_attn_ratio == 1 and spec.sparse_attn_min_tokens == 17
 
 
+def test_ffn_draft_requires_checkpoint_and_changes_graph_hash():
+    hashes = set()
+    for scope in ("all", "ffn", "gate_up", "down"):
+        if scope != "all":
+            with pytest.raises(ValueError, match="draft checkpoint"):
+                config(sparse_attn_draft_weights_scope=scope)
+        hashes.add(config(sparse_attn_draft_weights="checkpoint",
+                          sparse_attn_draft_weights_scope=scope).compute_hash())
+    assert len(hashes) == 4
+
+
+@pytest.mark.parametrize("scope", ["all", "ffn", "gate_up", "down"])
+def test_draft_module_sharing_preserves_target(scope):
+    ffn_only = scope != "all"
+    import copy
+
+    import torch
+    from torch import nn
+
+    from vllm.v1.spec_decode.sparse_attn.draft_weights import (
+        _share_target_modules,
+        _validate_int4_ffns,
+    )
+
+    target = nn.Module()
+    target.model = nn.Module()
+    layer = nn.Module()
+    layer.self_attn = nn.Module()
+    layer.self_attn.attn = nn.Identity()
+    layer.self_attn.qkv_proj = nn.Linear(4, 4, dtype=torch.bfloat16)
+    layer.mlp = nn.Module()
+    layer.mlp.gate_up_proj = nn.Linear(4, 4, dtype=torch.bfloat16)
+    layer.mlp.down_proj = nn.Linear(4, 4, dtype=torch.bfloat16)
+    layer.input_layernorm = nn.LayerNorm(4, dtype=torch.bfloat16)
+    layer.post_attention_layernorm = nn.LayerNorm(4, dtype=torch.bfloat16)
+    target.model.layers = nn.ModuleList([layer])
+    target.model.norm = nn.LayerNorm(4, dtype=torch.bfloat16)
+    target.model.embed_tokens = nn.Embedding(8, 4, dtype=torch.bfloat16)
+    target.lm_head = nn.Linear(4, 8, dtype=torch.bfloat16)
+    draft = copy.deepcopy(target)
+    original = {name: param.clone() for name, param in target.named_parameters()}
+    draft_ffn = draft.model.layers[0].mlp
+    _share_target_modules(target, draft, ffn_only=ffn_only, scope=scope)
+    assert draft.model.layers[0].mlp is draft_ffn
+    assert draft_ffn is not layer.mlp
+    assert (draft_ffn.gate_up_proj is layer.mlp.gate_up_proj) == (scope == "down")
+    assert (draft_ffn.down_proj is layer.mlp.down_proj) == (scope == "gate_up")
+    assert (draft.model.layers[0].self_attn is layer.self_attn) == ffn_only
+    assert draft.model.layers[0].self_attn.attn is layer.self_attn.attn
+    assert (draft.model.norm is target.model.norm) == ffn_only
+    assert draft.model.embed_tokens is target.model.embed_tokens
+    assert draft.lm_head is target.lm_head
+    for name, param in target.named_parameters():
+        torch.testing.assert_close(param, original[name], rtol=0, atol=0)
+    # Reject a BF16 checkpoint instead of silently calling it INT4.
+    with pytest.raises(ValueError, match="INT4 W4A16"):
+        _validate_int4_ffns(draft)
+
+    from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
+        CompressedTensorsWNA16,
+    )
+
+    for projection in (draft_ffn.gate_up_proj, draft_ffn.down_proj):
+        projection.scheme = CompressedTensorsWNA16("group", 4, group_size=128)
+    _validate_int4_ffns(draft)
+    draft_ffn.down_proj.scheme = CompressedTensorsWNA16("group", 8, group_size=128)
+    with pytest.raises(ValueError, match="layer 0 down_proj"):
+        _validate_int4_ffns(draft)
+
+
+def test_draft_loader_resets_revision_and_cleans_registry_on_failure(monkeypatch):
+    from dataclasses import dataclass
+    from types import SimpleNamespace as NS
+
+    from vllm.model_executor import model_loader
+    from vllm.v1.spec_decode.sparse_attn.draft_weights import load_draft_model
+
+    @dataclass
+    class Model:
+        model: str = "target"
+        revision: str | None = "target-commit"
+        code_revision: str | None = "target-code-commit"
+        quantization: str | None = None
+
+    @dataclass
+    class Config:
+        model_config: Model
+        compilation_config: object
+        quant_config: object = None
+
+    target_attention = object()
+    registry = {"target": target_attention}
+    cfg = Config(Model(), NS(static_forward_context=registry))
+
+    def failing_loader(*, vllm_config, prefix):
+        model = vllm_config.model_config
+        assert model.model == "/pinned/draft"
+        assert model.revision is model.code_revision is None
+        registry[prefix] = object()
+        raise RuntimeError("incomplete checkpoint")
+
+    monkeypatch.setattr(model_loader, "get_model", failing_loader)
+    with pytest.raises(RuntimeError, match="incomplete checkpoint"):
+        load_draft_model(cfg, None, "/pinned/draft")
+    assert cfg.model_config.revision == "target-commit"
+    assert registry == {"target": target_attention}
+
+
 def test_fp8_cache_rejected_before_initialization():
     from types import SimpleNamespace
 
