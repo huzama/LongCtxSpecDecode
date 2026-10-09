@@ -7,7 +7,8 @@ at one layer: the per-token attention mass of the scored prefix ``[0, P)``.
 Sink ``[0, S)`` and recency ``[P - R, P)`` are reserved and always selected;
 the candidates in between are ranked by a radix select over their bf16 keys,
 the same key mapping as the fork's top-k kernel, but the bucket scan stops
-where reserved plus cumulative candidate mass reaches ``theta * total`` and
+where reserved plus cumulative candidate mass reaches ``theta * total``, or
+with ``residual`` where candidate mass reaches ``theta * (total - reserved)``, and
 resolves the number of tied elements at the threshold from the threshold
 value itself. The count is then clamped to ``[k_min, k_max]`` per row; when
 the clamp moves it, a count-based radix select finds the new threshold. One
@@ -228,7 +229,7 @@ __global__ void __launch_bounds__(BlockSize) SelectKernel(
     int32_t* __restrict__ out_idx,
     int32_t* __restrict__ used,
     int32_t max_len, int32_t width,
-    float theta, int32_t sink, int32_t recent) {
+    float theta, int32_t sink, int32_t recent, bool residual) {
 
     __shared__ State st;
     __shared__ int cnt[NumBuckets];
@@ -267,7 +268,7 @@ __global__ void __launch_bounds__(BlockSize) SelectKernel(
         st.k_star = 0;
         st.num_kth_needed = 0;
         st.count_before = 0;
-        st.need = theta * total - reserved;
+        st.need = residual ? theta * (total - reserved) : theta * total - reserved;
         st.select_all = false;
         st.done = false;
         st.out_cnt = 0;
@@ -334,7 +335,7 @@ __global__ void __launch_bounds__(BlockSize) SelectKernel(
 void launch_mass_select(
     at::Tensor metric, at::Tensor valid_lens, at::Tensor k_min,
     at::Tensor k_max, at::Tensor out_idx, at::Tensor used,
-    double theta, int64_t sink, int64_t recent) {
+    double theta, int64_t sink, int64_t recent, bool residual) {
     TORCH_CHECK(metric.dim() == 2 && metric.is_contiguous() && metric.is_cuda(),
                 "metric must be a contiguous 2D CUDA tensor");
     TORCH_CHECK(out_idx.dim() == 2 && out_idx.is_contiguous(),
@@ -372,7 +373,7 @@ void launch_mass_select(
         static_cast<int32_t>(metric.size(1)),
         static_cast<int32_t>(out_idx.size(1)),
         static_cast<float>(theta), static_cast<int32_t>(sink),
-        static_cast<int32_t>(recent));
+        static_cast<int32_t>(recent), residual);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 """
@@ -381,7 +382,7 @@ _CPP_SRC = """
 void launch_mass_select(
     at::Tensor metric, at::Tensor valid_lens, at::Tensor k_min,
     at::Tensor k_max, at::Tensor out_idx, at::Tensor used,
-    double theta, int64_t sink, int64_t recent);
+    double theta, int64_t sink, int64_t recent, bool residual);
 """
 
 _module = None
@@ -417,6 +418,7 @@ def mass_select(
     theta: float,
     sink: int,
     recent: int,
+    residual: bool = False,
 ) -> None:
     """Select per row; see the module docstring for the contract."""
     _get_module().launch_mass_select(
@@ -429,4 +431,5 @@ def mass_select(
         float(theta),
         int(sink),
         int(recent),
+        bool(residual),
     )

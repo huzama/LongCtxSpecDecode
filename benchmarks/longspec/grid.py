@@ -82,6 +82,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="attention-mass target; used only with --no-fixed-budget",
     )
     p.add_argument(
+        "--theta-scope",
+        choices=("total", "residual"),
+        default="total",
+        help="theta counts reserved sink/recent mass, or only the rest",
+    )
+    p.add_argument(
         "--fixed-budget",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -138,6 +144,8 @@ def parse_args(argv=None) -> argparse.Namespace:
         args.verify_ratio == 1 or not args.fixed_budget
     ):
         p.error("selected scoring requires --verify-ratio below 1 and fixed budget")
+    if args.theta_scope != "total" and args.fixed_budget:
+        p.error("--theta-scope applies only with --no-fixed-budget")
     if min(args.ctx, args.batch, args.gen, args.samples, args.spec_tokens) < 1:
         p.error("context, batch, generation, samples and draft length must be positive")
     if not args.cells and args.ctx + args.gen > MAX_WINDOW:
@@ -547,6 +555,7 @@ def speculative_config(args) -> dict | None:
         if value is not None:
             cfg[f"sparse_attn_{key}"] = value
     cfg["sparse_attn_fixed_budget"] = args.fixed_budget
+    cfg["sparse_attn_theta_scope"] = args.theta_scope
     cfg["sparse_attn_verify_ratio"] = args.verify_ratio
     cfg["sparse_attn_verify_score_scope"] = args.verify_score_scope
     checkpoint = args.draft_weights or "target"
@@ -859,6 +868,7 @@ def measure(llm, args, prompts, factor, slot) -> tuple[dict, list]:
                     "sparse_attn_verify_score_scope",
                     "sparse_attn_min_tokens",
                     "sparse_attn_theta",
+                    "sparse_attn_theta_scope",
                     "sparse_attn_sink",
                     "sparse_attn_recent",
                     "sparse_attn_draft_weights",

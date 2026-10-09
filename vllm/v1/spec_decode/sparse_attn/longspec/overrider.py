@@ -256,6 +256,7 @@ class LongSpecAttnOverrider(BaseAttnOverrider):
             self.spec.sparse_attn_theta,
             self.spec.sparse_attn_sink,
             self.spec.sparse_attn_recent,
+            residual=self.spec.sparse_attn_theta_scope == "residual",
         )
         if self._stats is not None:
             self._stats.accumulate(self._used, self._valid_lens)

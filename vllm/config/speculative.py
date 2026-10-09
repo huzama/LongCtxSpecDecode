@@ -190,7 +190,11 @@ class SpeculativeConfig:
     Requires sparse verification and fixed-budget draft selection."""
 
     sparse_attn_theta: float = Field(default=0.85, gt=0, le=1)
-    """Coverage attention-mass target, including reserved sink and recent tokens."""
+    """Coverage attention-mass target; sparse_attn_theta_scope sets its mass."""
+
+    sparse_attn_theta_scope: Literal["total", "residual"] = "total"
+    """'total': reserved sink and recent tokens count toward the target.
+    'residual': the target applies only to mass outside the reserved ranges."""
 
     sparse_attn_sink: int = Field(default=4, ge=0)
     """Leading tokens always kept by coverage selection."""
@@ -252,7 +256,7 @@ class SpeculativeConfig:
                     "num_speculative_tokens", "sparse_attn_algorithm",
                     "sparse_attn_ratio", "sparse_attn_fixed_budget",
                     "sparse_attn_min_tokens", "sparse_attn_theta",
-                    "sparse_attn_sink", "sparse_attn_recent",
+                    "sparse_attn_theta_scope", "sparse_attn_sink", "sparse_attn_recent",
                     "sparse_attn_score_source", "sparse_attn_draft_kv",
                     "sparse_attn_collect_stats",
                 )

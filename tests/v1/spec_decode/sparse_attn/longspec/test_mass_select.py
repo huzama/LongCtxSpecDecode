@@ -15,8 +15,11 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU")
 EPS = 1e-3  # relative slack on theta for near-exact crossings
 
 
-def reference_k(row: torch.Tensor, S: int, R: int, theta: float) -> int:
-    """Smallest k whose mass with the reserved ranges reaches theta * total.
+def reference_k(
+    row: torch.Tensor, S: int, R: int, theta: float, residual: bool = False
+) -> int:
+    """Smallest k whose mass with the reserved ranges reaches theta * total,
+    or alone reaches theta * (total - reserved) with ``residual``.
     ``row`` is the scored prefix in float64."""
     P = row.numel()
     s_eff = min(S, P)
@@ -26,7 +29,7 @@ def reference_k(row: torch.Tensor, S: int, R: int, theta: float) -> int:
         return cand.numel()
     total = row.sum()
     reserved = total - cand.sum()
-    target = theta * total - reserved
+    target = theta * (total - reserved) if residual else theta * total - reserved
     if total <= 0 or target <= 0:
         return 0
     cum = cand.sort(descending=True).values.cumsum(0)
@@ -38,14 +41,17 @@ def clamp(k: int, k_min: int, k_max: int, n_cand: int) -> int:
     return min(max(k, k_min), k_max, n_cand)
 
 
-def check_row(metric_row, table_row, used, P, S, R, theta, k_min, k_max):
+def check_row(
+    metric_row, table_row, used, P, S, R, theta, k_min, k_max, residual=False
+):
     row = metric_row[:P].double()
     s_eff = min(S, P)
     r_eff = min(R, P - s_eff)
     n_cand = P - s_eff - r_eff
-    k_lo = clamp(reference_k(row, S, R, theta * (1 - EPS)), k_min, k_max, n_cand)
-    k_hi = clamp(reference_k(row, S, R, theta * (1 + EPS)), k_min, k_max, n_cand)
-    k_ref = clamp(reference_k(row, S, R, theta), k_min, k_max, n_cand)
+    def k_at(t):
+        return clamp(reference_k(row, S, R, t, residual), k_min, k_max, n_cand)
+
+    k_lo, k_ref, k_hi = k_at(theta * (1 - EPS)), k_at(theta), k_at(theta * (1 + EPS))
     k = int(used) - s_eff - r_eff
     assert k_lo <= k <= k_hi, (k, k_lo, k_ref, k_hi)
     idx = table_row[: int(used)].long()
@@ -69,7 +75,9 @@ def softmax_rows(rows, max_len, P_list, device, sparse=False):
     return m.to(torch.bfloat16)
 
 
-def run(metric, P_list, S, R, theta, k_min_list, k_max_list, width=None):
+def run(
+    metric, P_list, S, R, theta, k_min_list, k_max_list, width=None, residual=False
+):
     device = metric.device
     rows = metric.shape[0]
     valid = torch.tensor(P_list, dtype=torch.int32, device=device)
@@ -78,25 +86,31 @@ def run(metric, P_list, S, R, theta, k_min_list, k_max_list, width=None):
     width = width or (max(P_list) + S + R)
     table = torch.full((rows, width), -1, dtype=torch.int32, device=device)
     used = torch.full((rows,), -1, dtype=torch.int32, device=device)
-    mass_select(metric, valid, k_min, k_max, table, used, theta, S, R)
+    mass_select(metric, valid, k_min, k_max, table, used, theta, S, R, residual)
     return table, used
 
 
+@pytest.mark.parametrize("residual", [False, True])
 @pytest.mark.parametrize("theta", [0.5, 0.9, 1.0])
 @pytest.mark.parametrize("sparse", [False, True])
-def test_matches_reference(theta, sparse):
+def test_matches_reference(theta, sparse, residual):
     device, S, R = "cuda", 4, 8
     P_list = [0, 1, S + R - 1, S + R, 100, 4096, 131072]
     max_len = max(P_list)
     metric = softmax_rows(len(P_list), max_len, P_list, device, sparse)
     k_min = [0] * len(P_list)
     k_max = [max_len] * len(P_list)
-    table, used = run(metric, P_list, S, R, theta, k_min, k_max)
+    table, used = run(
+        metric, P_list, S, R, theta, k_min, k_max, residual=residual
+    )
     for r, P in enumerate(P_list):
         if P == 0:
             assert int(used[r]) == 0 and torch.all(table[r] == -1)
             continue
-        check_row(metric[r], table[r], used[r], P, S, R, theta, k_min[r], k_max[r])
+        check_row(
+            metric[r], table[r], used[r], P, S, R, theta, k_min[r], k_max[r],
+            residual,
+        )
 
 
 def test_theta_one_selects_every_candidate():
