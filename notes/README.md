@@ -1,11 +1,13 @@
-# Long-context speculative decoding
+# Highlight-drafted speculative decoding
 
-Self-speculative decoding at long context, on the Vegas vLLM fork.
+The active implementation is the `highlight-spec` worktree: a vLLM plugin over
+MoLLE's Highlight (SpotAttention). The `thesis` branch holds the Vegas baseline.
 
-| File | Holds |
+| File | Purpose |
 |---|---|
-| [Method.md](Method.md) | The current method, proposed sparse verification, evaluation plan, and what we tried and dropped |
-| [experiments.md](experiments.md) | Experiment setup, batch-selection rules, and result tables |
-| [literature.yaml](literature.yaml) | Paper summaries and historical research ideas |
+| [experiments.md](experiments.md) | Method, measurement protocol, results and limitations |
+| [literature.yaml](literature.yaml) | Literature survey and historical research ideas |
 
-Everything before the fork is on branch `survey-and-prototypes`.
+B200 run artifacts and audits stay under `outputs/`. The five-method audit
+validates completed cells before updating the experiment tables; blank cells
+are unmeasured. The development archive is linked from `experiments.md`.

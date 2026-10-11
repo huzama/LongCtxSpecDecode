@@ -20,7 +20,7 @@ The user directs. Claude follows.
 
 ## Project
 
-This repository is the Vegas vLLM fork (github.com/platformxlab/vegas, remote `upstream`) plus `notes/`. Read `notes/experiments.md` first; it is the working contract. `notes/Method.md` is the method. `notes/literature.yaml` is the surveyed literature. Branch `survey-and-prototypes` is an archive: read, never edit.
+This repository is the Vegas vLLM fork (github.com/platformxlab/vegas, remote `upstream`) plus `notes/`. Read `notes/experiments.md` first; it holds the method, protocol and results. `notes/literature.yaml` is the surveyed literature. Branch `survey-and-prototypes` is an archive: read, never edit.
 
 ## Environment
 
