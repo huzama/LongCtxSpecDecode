@@ -207,6 +207,67 @@ timings do not establish equal selection quality against Vegas/TriForce at 7%.
 [Selector results and source hashes](../outputs/worktrees/highlight-spec/outputs/evidence/selectors.json).
 
 
+### MXFP4 Highlight
+
+MXFP4 indexer keys and native Blackwell scoring; model weights and backbone KV
+remain BF16. Existing matched throughput batches and frozen accuracy prompts
+are reused. Quantization adds capacity headroom; these batches are not retuned
+to the MXFP4 saturation limit. Dense and external-selector baselines above are reused.
+
+Queue: 0/111 jobs complete, 0 running, 0 failed. This includes one native-kernel validation job and 110 measurement jobs.
+
+**Decode throughput (tokens/s)**. Same prefill barrier, 512 outputs, asynchronous
+scheduling off, decode-only window and three repetitions as BF16. Cells remain
+blank until all three repetitions pass validation.
+
+| Model | Context | Batch | Direct Highlight | Dense verifier | SV50 | SV40 |
+|---|---:|---:|---:|---:|---:|---:|
+| 4B | 32768 | 26 |  |  |  |  |
+| 4B | 65536 | 13 |  |  |  |  |
+| 4B | 130560 | 6 |  |  |  |  |
+| 8B | 32768 | 25 |  |  |  |  |
+| 8B | 65536 | 12 |  |  |  |  |
+| 8B | 130560 | 6 |  |  |  |  |
+
+**RULER (%)**. Same six needle tasks × 32 rows, batch 1, cap 1024.
+
+| Model | Haystack tokens | Direct Highlight | Dense verifier | SV50 | SV40 |
+|---|---:|---:|---:|---:|---:|
+| 4B | 65536 |  |  |  |  |
+| 4B | 129024 |  |  |  |  |
+| 8B | 65536 |  |  |  |  |
+| 8B | 129024 |  |  |  |  |
+
+**LongBench v2 (%)**. Same 60 questions/model and answer-only/CoT token caps.
+
+| Model | Protocol | Direct Highlight | Dense verifier | SV50 | SV40 |
+|---|---|---:|---:|---:|---:|
+| 4B | Answer-only |  |  |  |  |
+| 4B | CoT |  |  |  |  |
+| 8B | Answer-only |  |  |  |  |
+| 8B | CoT |  |  |  |  |
+
+**Highlight selector timing**. Same batch-1 inputs, layers, budgets and CUDA-graph
+aggregation as the BF16 selector table. Total sums score and rank medians;
+native paged attention needs no KV gather. Extra KV includes the MXFP4 scales.
+
+| Model | Context | Budget | Tokens/head | Score (µs) | Rank (µs) | Total (µs) | Initialization (ms) | Extra KV (MiB) |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| 4B | 32768 | Matched |  |  |  |  |  |  |
+| 4B | 32768 | Paper |  |  |  |  |  |  |
+| 4B | 65536 | Matched |  |  |  |  |  |  |
+| 4B | 65536 | Paper |  |  |  |  |  |  |
+| 4B | 130560 | Matched |  |  |  |  |  |  |
+| 4B | 130560 | Paper |  |  |  |  |  |  |
+| 8B | 32768 | Matched |  |  |  |  |  |  |
+| 8B | 32768 | Paper |  |  |  |  |  |  |
+| 8B | 65536 | Matched |  |  |  |  |  |  |
+| 8B | 65536 | Paper |  |  |  |  |  |  |
+| 8B | 130560 | Matched |  |  |  |  |  |  |
+| 8B | 130560 | Paper |  |  |  |  |  |  |
+
+[MXFP4 results and source hashes](../outputs/worktrees/highlight-spec/outputs/evidence/mxfp4.json).
+
 ### Findings
 
 Dense verification: 1.038–1.171× direct Highlight throughput.
