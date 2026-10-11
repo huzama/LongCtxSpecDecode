@@ -66,8 +66,8 @@ factors 2/3/4 for the three lengths, native base 32768.
 | 4B | 32768 | 26 | 864.3 (1.000x) | 2126.8 (2.461x) | 2350.3 (2.719x) | 2654.0 (3.071x) | 2826.8 (3.271x) |
 | 4B | 65536 | 13 | 448.8 (1.000x) | 1110.2 (2.474x) | 1229.6 (2.740x) | 1395.9 (3.111x) | 1489.5 (3.319x) |
 | 4B | 130560 | 6 | 263.2 (1.000x) | 564.3 (2.144x) | 660.9 (2.511x) | 715.2 (2.717x) | 758.7 (2.882x) |
-| 8B | 32768 | 25 | 806.0 (1.000x) |  | 2008.2 (2.492x) | 2291.5 (2.843x) | 2359.2 (2.927x) |
-| 8B | 65536 | 12 | 418.6 (1.000x) |  | 1008.3 (2.409x) | 1121.8 (2.680x) | 1207.8 (2.885x) |
+| 8B | 32768 | 25 | 806.0 (1.000x) | 1934.9 (2.401x) | 2008.2 (2.492x) | 2291.5 (2.843x) | 2359.2 (2.927x) |
+| 8B | 65536 | 12 | 418.6 (1.000x) | 964.4 (2.304x) | 1008.3 (2.409x) | 1121.8 (2.680x) | 1207.8 (2.885x) |
 | 8B | 130560 | 6 | 253.7 (1.000x) | 505.0 (1.991x) | 532.7 (2.100x) | 586.7 (2.313x) | 621.0 (2.448x) |
 
 Direct Highlight at 4B/130560 uses three repetitions, 558.7–571.3 tokens/s.
@@ -80,7 +80,7 @@ EOS stopping, cap 1024. Lengths below are haystack tokens; prompts add 37–74.
 
 | Model | Haystack tokens | Dense | Direct Highlight | Our dense verifier | Our SV50 | Our SV40 |
 |---|---:|---:|---:|---:|---:|---:|
-| 4B | 65536 | 86.98 |  |  | 86.98 | 86.98 |
+| 4B | 65536 | 86.98 | 86.98 | 86.98 | 86.98 | 86.98 |
 | 4B | 129024 | 68.75 | 68.75 | 68.75 | 68.75 | 69.27 |
 | 8B | 65536 | 86.98 |  |  | 87.50 | 88.02 |
 | 8B | 129024 | 75.52 |  |  | 76.56 | 76.56 |
@@ -108,16 +108,45 @@ CoT reasoning hits the cap on 7–10/60 questions for 4B and 24–27/60 for 8B.
 Quality tasks have no matched timing: their scores and the throughput table
 are separate evidence, not measured points on a speed–quality curve.
 
+### Selector comparisons (planned)
+
+After the current generation runs finish, compare Highlight, Vegas and
+TriForce selector timing and memory under matched-token and paper-budget
+settings. Repeat these rows per agreed model/context; blank cells are unmeasured.
+
+Selector-quality evidence comes from [Chapter 2's attention-map and retrieval
+analysis](https://github.com/huzama/PhDThesis/blob/76271e73a045ff853f33f0f608305cccd8b072a3/thesis/chapters/02-distilled-selectors.tex#L190)
+(`fig:distilled:attention-maps`, `fig:distilled:attention-retrieval`). We reuse
+that evidence here; these timings do not establish equal selection quality
+against Vegas/TriForce at the 7% drafting budget.
+
+| Budget protocol | Selector | Tokens/head | Score (µs) | Rank/index (µs) | Gather (µs) | Initialization (ms) | Extra KV (MiB) |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Matched | Highlight | | | | | | |
+| Matched | Vegas | | | | | | |
+| Matched | TriForce | | | | | | |
+| Paper | Highlight | | | | | | |
+| Paper | Vegas | | | | | | |
+| Paper | TriForce | | | | | | |
+
+Score includes acquisition and reduction; Vegas uses the incremental cost of
+fused collection during verification. Initialization is one-time selector
+preparation, such as TriForce's chunk-key means; it excludes model loading,
+compilation and warm-up. Amortize measured costs using each selector's actual
+refresh count. Preserve native granularity; TriForce keeps per-query-head
+selections with gathered KV, initializes once at prefill, then updates the tail.
+GPU validation and common-input capture/timing integration remain pending.
+
 ### Missing evidence
 
-- Direct Highlight: 2 throughput, 3 RULER, 4 LongBench cells remain in the authorized queue.
-- Our dense verifier: 0 throughput, 3 RULER, 4 LongBench cells remain in the authorized queue.
+- Direct Highlight: 0 throughput, 2 RULER, 4 LongBench cells remain in the authorized queue.
+- Our dense verifier: 0 throughput, 2 RULER, 4 LongBench cells remain in the authorized queue.
 - Comparable timing on scored workloads is still missing; the current tables do not establish a speed–quality curve.
 
 ### Evidence
 
 [Audited results](../outputs/worktrees/highlight-spec/outputs/evidence/methods.json) include per-task scores, paired changes,
-intervals and 338 source hashes. [Audit script](../outputs/worktrees/highlight-spec/outputs/evidence/methods-audit.py).
+intervals and 356 source hashes. [Audit script](../outputs/worktrees/highlight-spec/outputs/evidence/methods-audit.py).
 [Vegas comparison](../outputs/worktrees/highlight-spec/outputs/evidence/chapter.json): our dense verifier is 1.032–1.162× faster,
 but the runtimes differ.
 
