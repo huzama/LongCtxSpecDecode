@@ -103,7 +103,7 @@ class FusedVegasAttention:
         boundaries = [last, -1] if self.boundary_count == 1 else [0, last]
         self.rows = torch.tensor([boundaries] * q.shape[0], device=q.device, dtype=torch.int32)
         self.scores = torch.empty((q.shape[0], 2, q.shape[2], prefix_tokens),
-                                  device=q.device, dtype=torch.bfloat16)
+                                  device=q.device, dtype=torch.float32)
         self.out = torch.empty_like(q)
 
     def attention(self) -> torch.Tensor:
@@ -113,7 +113,8 @@ class FusedVegasAttention:
         return self.out
 
     def reduce(self) -> torch.Tensor:
-        # Same boundary/head aggregation as Vegas; BF16 storage, FP32 reduction.
+        # Keep the accumulator precision through head/boundary reduction.
+        # BF16 storage introduces avoidable error when signed logits cancel.
         return self.scores[:, :self.boundary_count].mean(dim=(1, 2), dtype=torch.float32)
 
     @property

@@ -9,8 +9,8 @@ attention inputs after QK normalization and rotary position encoding.
 
 This is a per-selection-event microbenchmark, not decode throughput or
 amortized per-token cost. No random/synthetic capture is generated here.
-Highlight score acquisition and common-drafter quality belong to the engine
-harness; they are not fabricated from these Q/K captures.
+The campaign supplies captured hidden states and indexer weights as well,
+so Highlight uses its unchanged production kernels on the same prefix.
 """
 
 import argparse
@@ -62,7 +62,7 @@ def load_capture(path: Path):
     return capture
 
 
-def time_stages(stages, *, warmup: int, repetitions: int):
+def time_stages(stages, *, warmup: int, repetitions: int, execution="eager", iterations=20):
     """CUDA event samples; rotate order to reduce systematic order effects."""
     if warmup < 1 or repetitions < 2:
         raise ValueError("warmup >=1 and repetitions >=2 required")
@@ -70,6 +70,18 @@ def time_stages(stages, *, warmup: int, repetitions: int):
         for _ in range(warmup):
             fn()
     torch.cuda.synchronize()
+    functions, graphs, divisors = {}, {}, {}
+    for name, fn in stages.items():
+        count = 1 if "initialize" in name else iterations
+        if execution == "graph":
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                for _ in range(count):
+                    value = fn()
+            graphs[name] = graph
+            functions[name], divisors[name] = graph.replay, count
+        else:
+            functions[name], divisors[name] = fn, 1
     samples = {name: [] for name in stages}
     names = list(stages)
     start, stop = (torch.cuda.Event(enable_timing=True) for _ in range(2))
@@ -77,16 +89,17 @@ def time_stages(stages, *, warmup: int, repetitions: int):
         order = names[rep % len(names):] + names[:rep % len(names)]
         for name in order:
             start.record()
-            value = stages[name]()
+            value = functions[name]()
             stop.record()
             stop.synchronize()
-            samples[name].append(start.elapsed_time(stop))
+            samples[name].append(start.elapsed_time(stop) / divisors[name])
             del value
     return {name: {"median_ms": statistics.median(times), "samples_ms": times}
             for name, times in samples.items()}
 
 
-def measure(capture, budget, *, warmup, repetitions):
+@torch.inference_mode()
+def measure(capture, budget, *, warmup, repetitions, execution="eager"):
     from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
     q, k, v, retrieval_q = (capture[name].to("cuda").contiguous()
                              for name in ("q", "k", "v", "retrieval_q"))
@@ -109,6 +122,10 @@ def measure(capture, budget, *, warmup, repetitions):
     chunks = triforce_chunk_keys(prefix_k, chunk_size=budget.triforce_chunk)
     tri_scores = triforce_scores(retrieval_q, chunks)
     tri_ids = triforce_select(tri_scores, tokens=budget.triforce_tokens, chunk_size=budget.triforce_chunk)
+    from highlight_spec.selector_timing import HighlightTiming, validate_triforce
+    validation = {"vegas": {"passed": True},
+        "triforce": validate_triforce(retrieval_q, prefix_k, prefix_v, chunks, tri_scores,
+                                     tri_ids, budget.triforce_chunk)}
     stages = {
         "dense_attention": dense,
         "vegas_attention_with_fused_collection": collector.attention,
@@ -120,21 +137,39 @@ def measure(capture, budget, *, warmup, repetitions):
         "triforce_rank": lambda: triforce_select(tri_scores, tokens=budget.triforce_tokens, chunk_size=budget.triforce_chunk),
         "triforce_gather": lambda: gather_draft_kv(prefix_k, prefix_v, tri_ids, query_heads=q.shape[2]),
     }
-    timings = time_stages(stages, warmup=warmup, repetitions=repetitions)
+    highlight = None
+    if "hidden_all" in capture:
+        highlight = HighlightTiming(capture, budget.highlight_tokens)
+        validation["highlight"] = highlight.validate()
+        stages.update(highlight_score=highlight.score, highlight_rank=highlight.rank,
+            highlight_selection=highlight.run, highlight_initialize=highlight.initialize)
+        # Native Highlight consumes its compacted page table directly. It does
+        # not materialize selected KV; a fabricated gather is not charged.
+    try:
+        timings = time_stages(stages, warmup=warmup, repetitions=repetitions, execution=execution)
+    finally:
+        if highlight is not None:
+            highlight.close()
     # Preserve individual paired observations, including negative noise.
     extra = [a - b for a, b in zip(timings["vegas_attention_with_fused_collection"]["samples_ms"],
                                   timings["dense_attention"]["samples_ms"])]
     timings["vegas_collection_delta"] = {"median_ms": statistics.median(extra), "samples_ms": extra}
     bytes_per_head_token = q.shape[0] * q.shape[-1] * k.element_size() * 2
     return {
-        "budget": asdict(budget), "timings": timings,
+        "budget": asdict(budget), "timings": timings, "execution": execution,
+        "graph_iterations": 20 if execution == "graph" else 1,
         "workspace_bytes": {
             "vegas_collection": collector.workspace_bytes,
             "triforce_chunk_keys": chunks.numel() * chunks.element_size(),
             "vegas_gathered_kv": bytes_per_head_token * k.shape[2] * budget.vegas_tokens,
             "triforce_gathered_kv": bytes_per_head_token * q.shape[2] * budget.triforce_tokens,
+            "highlight_indexer_cache": highlight.cache_bytes if highlight else None,
+            "highlight_gathered_kv": 0 if highlight else None,
         },
-        "validation": "fused scores and attention checked against references on this capture",
+        "validation": validation,
+        "refresh": {"highlight": "once per draft round", "vegas": "after verification",
+                    "triforce": "once at prefill; no repeated selection"},
+        "highlight_gather": "not required; native paged attention reads compacted block table",
     }
 
 

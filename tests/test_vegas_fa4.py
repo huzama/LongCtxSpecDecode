@@ -34,7 +34,7 @@ def test_compile_fused_collector_without_gpu(qlen, heads, kvheads):
                out=spec((1, qlen, heads, 128), torch.bfloat16),
                causal=True, num_splits=1, _arch=100,
                score_mod=marker,
-               aux_tensors=[spec((1, 2, heads, 259 - qlen + 1), torch.bfloat16), spec((1, 2), torch.int32, 4)],
+               aux_tensors=[spec((1, 2, heads, 259 - qlen + 1), torch.float32), spec((1, 2), torch.int32, 4)],
                compile_only=True)
 
 

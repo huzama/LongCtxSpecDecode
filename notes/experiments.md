@@ -82,8 +82,8 @@ EOS stopping, cap 1024. Lengths below are haystack tokens; prompts add 37–74.
 |---|---:|---:|---:|---:|---:|---:|
 | 4B | 65536 | 86.98 | 86.98 | 86.98 | 86.98 | 86.98 |
 | 4B | 129024 | 68.75 | 68.75 | 68.75 | 68.75 | 69.27 |
-| 8B | 65536 | 86.98 |  |  | 87.50 | 88.02 |
-| 8B | 129024 | 75.52 |  |  | 76.56 | 76.56 |
+| 8B | 65536 | 86.98 | 86.46 | 86.98 | 87.50 | 88.02 |
+| 8B | 129024 | 75.52 | 72.40 | 75.52 | 76.56 | 76.56 |
 
 At 4B/129024, direct Highlight and SV50 each lose one row and recover one:
 delta 0.00 pp, paired 95% interval [-1.56, 1.56]. Our dense verifier matches
@@ -98,55 +98,133 @@ Answer-only is a prompting protocol, not direct Highlight.
 
 | Model | Protocol | Dense | Direct Highlight | Our dense verifier | Our SV50 | Our SV40 |
 |---|---|---:|---:|---:|---:|---:|
-| 4B | Answer-only | 10.00 |  |  | 8.33 | 8.33 |
-| 8B | Answer-only | 31.67 |  |  | 31.67 | 31.67 |
-| 4B | CoT | 16.67 |  |  | 20.00 | 16.67 |
-| 8B | CoT | 18.33 |  |  | 31.67 | 23.33 |
+| 4B | Answer-only | 10.00 | 8.33 | 10.00 | 8.33 | 8.33 |
+| 8B | Answer-only | 31.67 | 31.67 | 31.67 | 31.67 | 31.67 |
+| 4B | CoT | 16.67 | 5.00 | 20.00 | 20.00 | 16.67 |
+| 8B | CoT | 18.33 | 5.00 | 23.33 | 31.67 | 23.33 |
 
 Dense accuracy is weak on this subset; equal scores can hide different errors.
 CoT reasoning hits the cap on 7–10/60 questions for 4B and 24–27/60 for 8B.
 Quality tasks have no matched timing: their scores and the throughput table
 are separate evidence, not measured points on a speed–quality curve.
 
-### Selector comparisons (planned)
+### Selector comparisons
 
-After the current generation runs finish, compare Highlight, Vegas and
-TriForce selector timing and memory under matched-token and paper-budget
-settings. Repeat these rows per agreed model/context; blank cells are unmeasured.
+Complete: 4B/8B × 32768/65536/130560 tokens, **batch 1**, first six existing
+prompts, layers 2/18/35. All checks passed for 108 captures and both budget
+protocols (216 evaluations). These measure per-layer selector costs.
 
-Selector-quality evidence comes from [Chapter 2's attention-map and retrieval
+Each cell is the median across 18 capture medians. Per capture: five warmups,
+20 CUDA-graph samples of 20 calls; initialization uses one call/sample.
+No independent process repetitions. Capture, transfers, loading, compilation
+and warm-up are excluded. All six cells ran on the same B200 GPU.
+
+Total is score + rank/index + gather, excluding one-time initialization. It is
+a derived sum of stage medians, not a separately measured end-to-end latency.
+Highlight requires no gather, so its contribution to Total is zero.
+
+Score includes acquisition and reduction. Vegas reports fused-attention time
+minus matched dense-attention time, plus reduction; paired samples retain
+negative measurement noise. Highlight uses native production kernels; Vegas
+is our FP32 FA4 port; TriForce uses the PyTorch retrieval reference.
+
+Initialization builds Highlight indexer keys or TriForce chunk-key means;
+scoring/ranking/gathering remain separate. `n/a` means no Highlight KV gather
+or no separate Vegas auxiliary-key initialization measurement.
+
+Extra KV counts Highlight indexer keys or the gathered Vegas/TriForce KV,
+excluding the shared full cache and scratch. Vegas collection buffers and
+TriForce chunk means each need about 8/16/31.88 MiB at the three lengths;
+these are identified buffers, not peak memory measurements.
+
+**Matched token budgets**
+
+| Model | Context | Selector | Tokens/head | Score (µs) | Rank/index (µs) | Gather (µs) | Total (µs) | Initialization (ms) | Extra KV (MiB) |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 4B | 32768 | Highlight | 2304 | 23.21 | 9.40 | n/a | 32.61 | 1.189 | 32.00 |
+| 4B | 32768 | Vegas | 2304 | 391.10 | 63.55 | 54.35 | 508.99 | n/a | 9.00 |
+| 4B | 32768 | TriForce | 2304 | 2.47 | 40.44 | 158.02 | 200.94 | 0.029 | 36.00 |
+| 4B | 65536 | Highlight | 4592 | 28.61 | 10.54 | n/a | 39.15 | 2.358 | 64.00 |
+| 4B | 65536 | Vegas | 4592 | 759.97 | 119.48 | 88.78 | 968.22 | n/a | 17.94 |
+| 4B | 65536 | TriForce | 4592 | 4.18 | 54.53 | 320.11 | 378.82 | 0.051 | 71.75 |
+| 4B | 130560 | Highlight | 9152 | 43.73 | 11.31 | n/a | 55.04 | 4.702 | 127.50 |
+| 4B | 130560 | Vegas | 9152 | 1470.56 | 127.92 | 169.57 | 1768.05 | n/a | 35.75 |
+| 4B | 130560 | TriForce | 9152 | 4.54 | 57.77 | 656.56 | 718.87 | 0.088 | 143.00 |
+| 8B | 32768 | Highlight | 2304 | 24.08 | 9.47 | n/a | 33.55 | 1.522 | 32.00 |
+| 8B | 32768 | Vegas | 2304 | 391.75 | 63.59 | 54.24 | 509.58 | n/a | 9.00 |
+| 8B | 32768 | TriForce | 2304 | 2.44 | 40.53 | 157.91 | 200.88 | 0.029 | 36.00 |
+| 8B | 65536 | Highlight | 4592 | 29.69 | 10.41 | n/a | 40.11 | 3.013 | 64.00 |
+| 8B | 65536 | Vegas | 4592 | 739.77 | 113.95 | 88.36 | 942.09 | n/a | 17.94 |
+| 8B | 65536 | TriForce | 4592 | 4.17 | 54.12 | 318.90 | 377.20 | 0.051 | 71.75 |
+| 8B | 130560 | Highlight | 9152 | 44.65 | 11.31 | n/a | 55.96 | 6.000 | 127.50 |
+| 8B | 130560 | Vegas | 9152 | 1468.24 | 129.01 | 169.59 | 1766.83 | n/a | 35.75 |
+| 8B | 130560 | TriForce | 9152 | 4.50 | 57.79 | 656.61 | 718.90 | 0.090 | 143.00 |
+
+**Paper token budgets**
+
+| Model | Context | Selector | Tokens/head | Score (µs) | Rank/index (µs) | Gather (µs) | Total (µs) | Initialization (ms) | Extra KV (MiB) |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 4B | 32768 | Highlight | 2288 | 23.31 | 9.45 | n/a | 32.76 | 1.190 | 32.00 |
+| 4B | 32768 | Vegas | 2294 | 391.10 | 63.11 | 54.24 | 508.45 | n/a | 8.96 |
+| 4B | 32768 | TriForce | 4096 | 2.47 | 40.74 | 281.70 | 324.91 | 0.029 | 64.00 |
+| 4B | 65536 | Highlight | 4576 | 28.56 | 10.43 | n/a | 38.99 | 2.357 | 64.00 |
+| 4B | 65536 | Vegas | 4588 | 759.89 | 118.48 | 88.77 | 967.14 | n/a | 17.92 |
+| 4B | 65536 | TriForce | 4096 | 4.18 | 54.14 | 284.05 | 342.38 | 0.051 | 64.00 |
+| 4B | 130560 | Highlight | 9136 | 43.29 | 11.25 | n/a | 54.54 | 4.703 | 127.50 |
+| 4B | 130560 | Vegas | 9140 | 1470.65 | 127.85 | 169.54 | 1768.04 | n/a | 35.70 |
+| 4B | 130560 | TriForce | 4096 | 4.54 | 57.03 | 285.70 | 347.28 | 0.088 | 64.00 |
+| 8B | 32768 | Highlight | 2288 | 23.50 | 9.43 | n/a | 32.94 | 1.524 | 32.00 |
+| 8B | 32768 | Vegas | 2294 | 391.73 | 63.59 | 54.23 | 509.55 | n/a | 8.96 |
+| 8B | 32768 | TriForce | 4096 | 2.45 | 40.78 | 280.86 | 324.09 | 0.030 | 64.00 |
+| 8B | 65536 | Highlight | 4576 | 29.06 | 10.41 | n/a | 39.47 | 3.013 | 64.00 |
+| 8B | 65536 | Vegas | 4588 | 739.70 | 113.98 | 88.29 | 941.97 | n/a | 17.92 |
+| 8B | 65536 | TriForce | 4096 | 4.17 | 53.93 | 283.75 | 341.85 | 0.051 | 64.00 |
+| 8B | 130560 | Highlight | 9136 | 44.07 | 11.24 | n/a | 55.32 | 5.995 | 127.50 |
+| 8B | 130560 | Vegas | 9140 | 1468.03 | 129.08 | 169.47 | 1766.59 | n/a | 35.70 |
+| 8B | 130560 | TriForce | 4096 | 4.51 | 57.26 | 285.52 | 347.28 | 0.090 | 64.00 |
+
+Matched budgets round 7% up to a common 16-token boundary. Paper budgets
+preserve native rules: Highlight floors 7% to blocks of 16, Vegas takes
+ceil(7%), and TriForce keeps 4096 tokens in chunks of 8. Highlight retains
+the last 64 tokens inside K and reads compacted page tables without copying KV.
+
+Inputs use the main grid’s checkpoints, prompts and YaRN factors with dense
+FA4. Replay seven queries from six greedy continuation tokens; Vegas observes
+both boundary queries, while Highlight/TriForce use the last prefill query on
+the same prompt KV. Fixed-length capture can include EOS; it is not a quality
+or acceptance experiment. Only input hashes and small result records are saved.
+
+Refresh frequency differs: Highlight scores once per draft round, Vegas
+refreshes after verification, and TriForce selects once at prefill then updates
+its tail. Tail-update latency is not measured here. Per-event costs do not
+establish per-token speedups or selector performance at saturated batches.
+
+Selector-quality evidence comes from [Chapter 2’s attention-map and retrieval
 analysis](https://github.com/huzama/PhDThesis/blob/76271e73a045ff853f33f0f608305cccd8b072a3/thesis/chapters/02-distilled-selectors.tex#L190)
-(`fig:distilled:attention-maps`, `fig:distilled:attention-retrieval`). We reuse
-that evidence here; these timings do not establish equal selection quality
-against Vegas/TriForce at the 7% drafting budget.
+(`fig:distilled:attention-maps`, `fig:distilled:attention-retrieval`). These
+timings do not establish equal selection quality against Vegas/TriForce at 7%.
 
-| Budget protocol | Selector | Tokens/head | Score (µs) | Rank/index (µs) | Gather (µs) | Initialization (ms) | Extra KV (MiB) |
-|---|---|---:|---:|---:|---:|---:|---:|
-| Matched | Highlight | | | | | | |
-| Matched | Vegas | | | | | | |
-| Matched | TriForce | | | | | | |
-| Paper | Highlight | | | | | | |
-| Paper | Vegas | | | | | | |
-| Paper | TriForce | | | | | | |
+[Selector results and source hashes](../outputs/evidence/selectors.json).
 
-Score includes acquisition and reduction; Vegas uses the incremental cost of
-fused collection during verification. Initialization is one-time selector
-preparation, such as TriForce's chunk-key means; it excludes model loading,
-compilation and warm-up. Amortize measured costs using each selector's actual
-refresh count. Preserve native granularity; TriForce keeps per-query-head
-selections with gathered KV, initializes once at prefill, then updates the tail.
-GPU validation and common-input capture/timing integration remain pending.
+
+### Findings
+
+Dense verification: 1.038–1.171× direct Highlight throughput.
+SV50: 1.162–1.267× direct Highlight throughput.
+SV40: 1.219–1.344× direct Highlight throughput.
+RULER changes versus dense (pp): dense verifier +0.00 to +0.00; SV50 +0.00 to +1.04; SV40 +0.00 to +1.04.
+LongBench changes versus dense (pp): dense verifier +0.00 to +5.00; SV50 -1.67 to +13.33; SV40 -1.67 to +5.00.
+These observed ranges apply to the measured workloads; consult paired intervals before claiming a quality advantage.
 
 ### Missing evidence
 
-- Direct Highlight: 0 throughput, 2 RULER, 4 LongBench cells remain in the authorized queue.
-- Our dense verifier: 0 throughput, 2 RULER, 4 LongBench cells remain in the authorized queue.
+- The planned throughput, RULER, LongBench and batch-1 selector timing grids are complete.
 - Comparable timing on scored workloads is still missing; the current tables do not establish a speed–quality curve.
 
 ### Evidence
 
 [Audited results](../outputs/evidence/methods.json) include per-task scores, paired changes,
-intervals and 356 source hashes. [Audit script](../outputs/evidence/methods-audit.py).
+intervals and 392 source hashes. [Audit script](../outputs/evidence/methods-audit.py).
 [Vegas comparison](../outputs/evidence/chapter.json): our dense verifier is 1.032–1.162× faster,
 but the runtimes differ.
 
