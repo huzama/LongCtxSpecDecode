@@ -52,6 +52,8 @@ def add_engine_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--verify-fraction", type=float, default=0.0,
                    help="verification keeps this fraction of the prompt; 0 verifies densely (lossless)")
     p.add_argument("--flash-attn-version", type=int, choices=(2, 3, 4), default=4)
+    p.add_argument("--indexer-cache-format", choices=("bf16", "mxfp4"), default="bf16",
+                   help="Highlight side-cache format; model weights and backbone KV stay BF16")
     p.add_argument("--gpu-mem-util", type=float, default=0.9)
     p.add_argument("--seed", type=int, default=42)
 
@@ -284,6 +286,8 @@ def selection_overrides(args) -> dict:
         }
         if args.topp_max_fraction is not None:
             selection["molle_topp_kmax"] = math.floor(round(args.topp_max_fraction * args.ctx, 6))
+    if args.indexer_cache_format != "bf16":
+        selection["molle_kcache_format"] = args.indexer_cache_format
     return {**selection, "molle_draft_select": args.draft_select, "molle_verify_fraction": args.verify_fraction}
 
 
@@ -291,6 +295,9 @@ def build_engine(args, scheduler_cls: str | None = "benchmarks.decode.BatchSched
     """max_model_len is args.ctx + args.gen; above the native window RoPE becomes static YaRN."""
     from vllm import LLM
     from spotattention.serve import stats
+
+    if args.mode == "dense" and args.indexer_cache_format != "bf16":
+        raise ValueError("dense has no Highlight indexer to quantize")
 
     factor = yarn_factor(args.ctx + args.gen)
     if args.mode == "highlight":
@@ -497,6 +504,7 @@ def main(argv=None) -> None:
             "prompt_sha256": [digest(p) for p in group],
             "spec_tokens": args.spec_tokens if args.mode == "highlight" else 0,
             "selection": selection_overrides(args) if args.mode != "dense" else None,
+            "indexer_cache_format": getattr(engine.model_config.hf_config, "molle_kcache_format", "bf16"),
             "measurement": "batch",
             "flash_attn_version": engine.attention_config.flash_attn_version,
             "gpu_memory_utilization": args.gpu_mem_util,

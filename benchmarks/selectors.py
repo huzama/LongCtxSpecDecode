@@ -173,6 +173,23 @@ def measure(capture, budget, *, warmup, repetitions, execution="eager"):
     }
 
 
+@torch.inference_mode()
+def measure_highlight(capture, budget, *, cache_format, warmup, repetitions):
+    """Only the changed Highlight variant; do not rerun unchanged baselines."""
+    from highlight_spec.selector_timing import HighlightTiming
+    selector = HighlightTiming(capture, budget.highlight_tokens, cache_format=cache_format)
+    try:
+        validation = selector.validate()
+        timings = time_stages(dict(highlight_score=selector.score, highlight_rank=selector.rank,
+            highlight_selection=selector.run, highlight_initialize=selector.initialize),
+            warmup=warmup, repetitions=repetitions, execution="graph")
+        return dict(budget=asdict(budget), indexer_cache_format=cache_format, timings=timings,
+            execution="graph", graph_iterations=20, validation={"highlight": validation},
+            workspace_bytes={"highlight_indexer_cache": selector.cache_bytes, "highlight_gathered_kv": 0})
+    finally:
+        selector.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--capture", type=Path, required=True)

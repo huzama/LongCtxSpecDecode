@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 
 class HighlightTiming:
-    def __init__(self, capture, tokens):
+    def __init__(self, capture, tokens, *, cache_format="bf16"):
         from transformers import Qwen3Config
         from spotattention.serve.bench.selector_compare.spotattention import make_config
         from spotattention.serve.indexer import Indexer
@@ -22,7 +22,9 @@ class HighlightTiming:
         if b != 1 or length % 16 or tokens % 16 or tokens > length:
             raise ValueError("Highlight timing requires one complete-block prefix/budget")
         self.tokens, self.length = tokens, length
-        cfg = make_config(Qwen3Config(**capture["config"]), length)
+        if cache_format not in {"bf16", "mxfp4"}:
+            raise ValueError("unsupported timing cache format")
+        cfg = make_config(Qwen3Config(**capture["config"]), length, cache_format=cache_format)
         self.cfg = cfg = replace(cfg, selection=replace(cfg.selection,
                                 mode="topk_tokens", topk_tokens=tokens, topk_recency=64))
         nb = length // 16
@@ -54,7 +56,7 @@ class HighlightTiming:
         self.slot = self.positions.clone()
         self.md = SimpleNamespace(block_table=table, seq_lens=torch.full((1,), length, **i32),
             query_start_loc=torch.arange(2, **i32), is_prefilling=torch.zeros(1, device="cuda", dtype=torch.bool))
-        self.cache = torch.empty((nb, 16, cfg.kcache_head_size), device="cuda", dtype=torch.bfloat16)
+        self.cache = torch.empty((nb, 16, cfg.kcache_head_size), device="cuda", dtype=cfg.kcache_dtype)
         self.all_positions = torch.arange(length, device="cuda")[None]
         self.offsets = torch.arange(16, device="cuda")
         self.initialize()
@@ -67,6 +69,7 @@ class HighlightTiming:
 
     def initialize(self):
         from spotattention.attention.sparse.indexer_rope import apply_qk_rope_fused
+        from spotattention.serve import kernels
         h, d = self.cfg.num_heads, self.cfg.head_dim
         for start in range(0, self.length, 2048):
             hidden = self.hidden_all[:, start:start + 2048]
@@ -75,7 +78,11 @@ class HighlightTiming:
                             self.indexer.k_norm.weight, self.indexer.k_norm.bias, self.cfg.k_norm_eps)
             _, k = apply_qk_rope_fused(q.reshape(1, -1, h, d), k, *self.indexer._tables,
                                      self.all_positions[:, start:start + hidden.shape[1]], self.cfg.rope_dim)
-            self.cache.view(1, self.length, h*d)[:, start:start + hidden.shape[1]].copy_(k.flatten(-2))
+            if self.cfg.kcache_quant:
+                kernels.quant_cache_write(k.reshape(-1, h*d), self.cache,
+                    self.all_positions[:, start:start + hidden.shape[1]].flatten(), self.cfg.kcache_format, h)
+            else:
+                self.cache.view(1, self.length, h*d)[:, start:start + hidden.shape[1]].copy_(k.flatten(-2))
         return self.cache
 
     def score(self):
@@ -100,9 +107,20 @@ class HighlightTiming:
     def validate(self):
         from spotattention.serve.kernels import reference
         self.score()
-        expected = reference.score_blocks(self.q, self.w, self.cache, self.md.block_table,
+        q, cache = self.q, self.cache
+        domain = self.indexer._kcfg.score_domain_for(self.cfg.kcache_format, self.cfg.score_domain)
+        kernel = self.indexer._kcfg.score_kernel_launch(self.cfg.kcache_format, domain)[0]
+        if self.cfg.kcache_format == "mxfp4":
+            if kernel != "native" or domain != "quant":
+                raise ValueError("MXFP4 timing requires the native SM100 quantized scorer")
+            h, d = self.cfg.num_heads, self.cfg.head_dim
+            encoded = reference.quantize_kcache_mxfp4(q.reshape(-1, 1, h*d), h)
+            q = reference.dequantize_kcache_mxfp4(encoded, h).reshape(-1, h, d)
+            cache = reference.dequantize_kcache_mxfp4(cache, h)
+        expected = reference.score_blocks(q, self.w, cache, self.md.block_table,
             self.md.seq_lens, self.md.query_start_loc, self.md.is_prefilling)
-        torch.testing.assert_close(self.indexer.sel.scores, expected, rtol=0.015, atol=0.04)
+        rtol, atol = (0.008, 0.002) if self.cfg.kcache_quant else (0.015, 0.04)
+        torch.testing.assert_close(self.indexer.sel.scores, expected, rtol=rtol, atol=atol)
         error = float((self.indexer.sel.scores.float() - expected.float()).abs().max())
         expected = self.indexer.sel.scores.clone()
         self.rank()
@@ -112,7 +130,8 @@ class HighlightTiming:
         expected_ids = torch.argsort(expected, descending=True, stable=True)[:, :self.tokens // 16].sort().values
         torch.testing.assert_close(sel.cmp_table[:, :self.tokens // 16].long(), expected_ids, rtol=0, atol=0)
         assert int(sel.seqused[0]) == self.tokens and int(sel.cnt[0]) == self.tokens // 16
-        return {"passed": True, "score_max_abs_error": error, "retained_tokens": self.tokens}
+        return {"passed": True, "score_max_abs_error": error, "retained_tokens": self.tokens,
+                "cache_format": self.cfg.kcache_format, "score_domain": domain, "score_kernel": kernel}
 
     @property
     def cache_bytes(self):

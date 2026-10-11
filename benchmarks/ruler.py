@@ -132,6 +132,7 @@ def run(argv=None) -> None:
         "ignore_eos": False,
         "dtype": str(engine.model_config.dtype),
         "kv_cache_dtype": engine.cache_config.cache_dtype,
+        "indexer_cache_format": getattr(engine.model_config.hf_config, "molle_kcache_format", "bf16"),
         "flash_attn_version": engine.attention_config.flash_attn_version,
         "seed": args.seed,
         "yarn_factor": decode.yarn_factor(args.ctx + args.gen),

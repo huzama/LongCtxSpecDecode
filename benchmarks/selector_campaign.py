@@ -10,7 +10,7 @@ from importlib.metadata import version
 import torch
 
 from benchmarks.selector_capture import ModelCapture, tensor_digest
-from benchmarks.selectors import measure
+from benchmarks.selectors import measure, measure_highlight
 from highlight_spec.selectors import SelectorBudget
 
 
@@ -40,8 +40,12 @@ def main():
     parser.add_argument("--layers", type=int, nargs="+", default=[2, 18, 35])
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--repetitions", type=int, default=20)
+    parser.add_argument("--indexer-cache-format", choices=("bf16", "mxfp4"), default="bf16")
+    parser.add_argument("--highlight-only", action="store_true")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
+    if args.indexer_cache_format != "bf16" and not args.highlight_only:
+        parser.error("quantized campaigns require --highlight-only; reuse unchanged baseline results")
     if os.environ.get("CUDA_VISIBLE_DEVICES") not in {"2", "3"}:
         parser.error("select exactly physical GPU 2 or 3")
     if args.out.exists():
@@ -71,7 +75,9 @@ def main():
         triforce_refresh_policy="prefill-once-tail-update",
         amortization="none; TriForce scores/ranks once at initialization, never each verification round",
         timing_excludes="model loading, backbone prefill/decode, input capture, transfers, compilation, warmup",
-        tensor_retention="in memory for one prompt only; hashes retained in each record")
+        tensor_retention="in memory for one prompt only; hashes retained in each record",
+        selectors=["highlight"] if args.highlight_only else ["highlight", "vegas", "triforce"],
+        indexer_cache_format=args.indexer_cache_format)
     atomic_json(args.out / "config.json", config)
     model = ModelCapture(args.checkpoint, args.ctx, args.layers)
     records = 0
@@ -90,8 +96,12 @@ def main():
                     "generated_token_ids", "trajectory", "checkpoint_config_sha256")}
                 provenance.update(prompt_file=str(path), prompt_file_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                                   tensor_sha256={k: tensor_digest(v) for k, v in capture.items() if isinstance(v, torch.Tensor)})
-                results = [measure(capture, budget, warmup=args.warmup,
-                                   repetitions=args.repetitions, execution="graph") for budget in budgets]
+                if args.highlight_only:
+                    results = [measure_highlight(capture, budget, cache_format=args.indexer_cache_format,
+                        warmup=args.warmup, repetitions=args.repetitions) for budget in budgets]
+                else:
+                    results = [measure(capture, budget, warmup=args.warmup,
+                                       repetitions=args.repetitions, execution="graph") for budget in budgets]
                 atomic_json(args.out / f"slot{slot}-layer{layer}.json", dict(provenance=provenance, results=results))
                 records += 1
                 del capture

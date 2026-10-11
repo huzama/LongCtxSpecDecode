@@ -172,6 +172,7 @@ def main(argv=None) -> None:
         "eos_token_ids": engine.model_config.try_get_generation_config().get("eos_token_id"),
         "dtype": str(engine.model_config.dtype),
         "kv_cache_dtype": engine.cache_config.cache_dtype,
+        "indexer_cache_format": getattr(engine.model_config.hf_config, "molle_kcache_format", "bf16"),
         "flash_attn_version": engine.attention_config.flash_attn_version,
         "seed": args.seed,
         "yarn_factor": decode.yarn_factor(args.ctx + args.gen),

@@ -64,6 +64,21 @@ def test_topk_selection_by_default():
     }
 
 
+@pytest.mark.parametrize("mode", ["direct", "highlight"])
+def test_mxfp4_changes_only_the_indexer_cache(monkeypatch, mode):
+    import vllm
+    args = _args(argv=["--indexer-cache-format", "mxfp4"])
+    args.mode, args.batch, args.gen = mode, 6, 128
+    monkeypatch.setattr(vllm, "LLM", lambda **kwargs: kwargs)
+    config = decode.build_engine(args)
+    assert config["hf_overrides"]["molle_kcache_format"] == "mxfp4"
+    assert config["dtype"] == "bfloat16" and config["kv_cache_dtype"] == "auto"
+    assert config["hf_overrides"]["molle_topk_fraction"] == .07
+    args.mode = "dense"
+    with pytest.raises(ValueError, match="no Highlight indexer"):
+        decode.build_engine(args)
+
+
 @pytest.mark.parametrize("mode", ["dense", "direct", "highlight"])
 def test_engine_selects_direct_or_speculative_execution(monkeypatch, mode):
     import vllm
