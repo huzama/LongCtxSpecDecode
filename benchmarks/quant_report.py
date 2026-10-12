@@ -115,9 +115,14 @@ def report(run, *, notes=None):
     lines += ["", "[MXFP4 results and source hashes](../outputs/evidence/mxfp4.json).", ""]
     if notes is not None:
         text = notes.read_text()
-        start, end = text.index("### MXFP4 Highlight"), text.index("### Findings")
-        assert start < end
-        notes.write_text(text[:start] + "\n".join(lines) + "\n" + text[end:])
+        # Completed reports integrate both formats and are edited as a whole.
+        # Only replace the original progress section while it still exists.
+        if "### MXFP4 Highlight" in text and "### Findings" in text:
+            start, end = text.index("### MXFP4 Highlight"), text.index("### Findings")
+            assert start < end
+            notes.write_text(text[:start] + "\n".join(lines) + "\n" + text[end:])
+        else:
+            print("Preserved integrated report; refreshed MXFP4 evidence only.")
         atomic_json(notes.parent.parent / "outputs/evidence/mxfp4.json", result)
     return result
 

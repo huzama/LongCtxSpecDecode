@@ -58,6 +58,11 @@ def validate(job, dest):
         return
     if kind == "selector":
         results = dest / "results"
+        cache_format = job.get("indexer_cache_format", "mxfp4")
+        selectors = job.get("selectors", ["highlight"])
+        config = json.loads((results / "config.json").read_text())
+        assert config["indexer_cache_format"] == cache_format
+        assert config["selectors"] == selectors
         files = list(results.glob("slot*-layer*.json"))
         assert len(files) == job["expected_rows"]
         finished = json.loads((results / "finished.json").read_text())
@@ -66,9 +71,11 @@ def validate(job, dest):
             row = json.loads(path.read_text())
             assert {v["budget"]["protocol"] for v in row["results"]} == {"matched", "paper"}
             for value in row["results"]:
-                assert value["indexer_cache_format"] == "mxfp4"
-                assert value["validation"]["highlight"]["passed"] is True
-                assert value["validation"]["highlight"]["score_kernel"] == "native"
+                assert value.get("indexer_cache_format", "bf16") == cache_format
+                assert all(value["validation"][name]["passed"] is True for name in selectors)
+                assert value["validation"]["highlight"]["cache_format"] == cache_format
+                expected_kernel = "native" if cache_format == "mxfp4" else "tma"
+                assert value["validation"]["highlight"]["score_kernel"] == expected_kernel
         return
     records = [json.loads(line) for line in (dest / "results.jsonl").read_text().splitlines()]
     assert len(records) == job["expected_rows"], "incomplete results"
@@ -96,6 +103,8 @@ def main():
     owner = (out / "controller.lock").open("a")
     fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
     plan = json.loads((out / "plan.json").read_text())
+    report_module = plan.get("report_module", "benchmarks.quant_report")
+    assert report_module in {"benchmarks.quant_report", "benchmarks.selector_report"}
     for filename, digest in plan.get("input_sha256", {}).items():
         assert hashlib.sha256((root / filename).read_bytes()).hexdigest() == digest, filename
     plan_hash = hashlib.sha256((out / "plan.json").read_bytes()).hexdigest()
@@ -126,7 +135,7 @@ def main():
 
     def report():
         with (out / "report.log").open("a") as log:
-            code = subprocess.call([str(root / ".venv/bin/python"), "-m", "benchmarks.quant_report",
+            code = subprocess.call([str(root / ".venv/bin/python"), "-m", report_module,
                                     "--run", str(out)], stdout=log, stderr=subprocess.STDOUT,
                                    env={**env, "CUDA_VISIBLE_DEVICES": ""})
         state["report_exit_code"] = code
