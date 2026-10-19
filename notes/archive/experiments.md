@@ -1,3 +1,5 @@
+> Frozen at the HTML transition on 15 October 2026. Read the [current report](../experiments.html) for updated results.
+
 # Learned selection and speculative decoding: method and experiments
 
 We evaluate Highlight's learned attention-block selection and its use in
@@ -6,8 +8,9 @@ compared at matched attention budgets and batch sizes. Model weights and
 backbone KV remain BF16 throughout.
 
 Highlight has the lowest summed selector-stage latency among the measured
-implementations. MXFP4 reduces indexer storage and improves Direct Highlight
-throughput in every measured setting. With MXFP4, sparse verification remains
+implementations. MXFP4 reduces indexer storage. In the historical
+forced-continuation workload, it improves Direct Highlight throughput in
+every measured setting. With MXFP4, sparse verification remains
 faster than Direct Highlight, while dense verification is slower. Accuracy
 results vary by task; they do not establish general quality preservation.
 
@@ -39,8 +42,10 @@ Dense verifier, SV50 and SV40 are our self-speculative variants. One round:
 4. Verification rewrites the proposed KV. Remove rejected positions from
    valid history before continuing.
 
-Budgets use the original prompt length and 16-token blocks. The last 64 tokens
-are retained inside the selection budget. Verification preserves causal
+Budgets use each request's original prompt length and 16-token blocks. Blocks
+covering the last 64 tokens receive priority inside the selection budget.
+Short CoT answer prompts can have too little budget to retain that window;
+the diagnosis below identifies this exception. Verification preserves causal
 access to its query positions. Sparse verification changes attention and KV
 history, so it does not guarantee full-attention outputs. Dense verification
 follows the greedy speculative contract, subject to the numerical limitations
@@ -183,7 +188,69 @@ quality between BF16 and MXFP4 indexers.
 
 ## 3. Decode throughput
 
-### Measurement protocol
+<!-- eos-throughput:start -->
+### EOS-stopped Multi-LexSum throughput
+
+Status: `running`; 70/216 process runs audited.
+
+Both models draw from the same 32 frozen cases, detailed-summary instruction, thinking off, and EOS or a 512-token cap. All prefills finish before timing; the window ends at the first request finish. The remaining requests drain outside timing. Three fresh processes per cell; median pooled tokens/s. All methods and indexer formats use the same capacity-checked batch within each model/context.
+
+Dense is tokens/s; other cells are ratios to its unrounded median. A cell stays empty until all three repetitions pass the raw-output audit.
+
+Every new process measures one full batch: the first B frozen cases, identical across methods and repetitions. Retained 32-batch results: Qwen3-4B at 32,768; Qwen3-4B at 65,536. Each speedup uses a dense reference with the same batch protocol. The main 8B and FFN tables share their identical one-batch dense controls.
+
+#### Qwen3-4B
+
+| Input tokens | Batch | Indexer | Dense (tok/s) | Direct (×) | DV (×) | SV50 (×) | SV40 (×) | SV25 (×) |
+|---:|---:|---|---:|---:|---:|---:|---:|---:|
+| 32,768 | 26 | BF16 | 861.73 | 2.493× | 2.396× | 2.793× | 2.883× |  |
+| 32,768 | 26 | MXFP4 | 861.73 | 3.048× | 2.501× | 2.930× | 3.118× | 3.345× |
+|  |  |  |  |  |  |  |  |  |
+| 65,536 | 13 | BF16 | 450.90 | 2.516× | 2.483× | 2.807× | 2.931× |  |
+| 65,536 | 13 | MXFP4 | 450.90 | 3.070× | 2.537× | 2.954× | 3.194× | 3.401× |
+|  |  |  |  |  |  |  |  |  |
+| 130,560 |  | BF16 |  |  |  |  |  |  |
+| 130,560 |  | MXFP4 |  |  |  |  |  |  |
+|  |  |  |  |  |  |  |  |  |
+
+#### Qwen3-8B
+
+| Input tokens | Batch | Indexer | Dense (tok/s) | Direct (×) | DV (×) | SV50 (×) | SV40 (×) | SV25 (×) |
+|---:|---:|---|---:|---:|---:|---:|---:|---:|
+| 32,768 |  | BF16 |  |  |  |  |  |  |
+| 32,768 |  | MXFP4 |  |  |  |  |  |  |
+|  |  |  |  |  |  |  |  |  |
+| 65,536 |  | BF16 |  |  |  |  |  |  |
+| 65,536 |  | MXFP4 |  |  |  |  |  |  |
+|  |  |  |  |  |  |  |  |  |
+| 130,560 |  | BF16 |  |  |  |  |  |  |
+| 130,560 |  | MXFP4 |  |  |  |  |  |  |
+|  |  |  |  |  |  |  |  |  |
+
+#### 8B FFN comparison
+
+Dense BF16 verification for every FFN draft variant. BF16 indexer keys; backbone KV remains BF16.
+
+Priority: one full batch per fresh process, three processes per cell. Use the first B frozen cases identically across all five methods. Dense controls are shared with the main 8B comparison. All FFN comparisons finish before remaining main-method jobs start.
+
+| Input tokens | Batch | Dense (tok/s) | BF16/full (×) | INT4/full (×) | BF16/Highlight (×) | INT4/Highlight (×) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 32,768 |  |  |  |  |  |  |
+| 65,536 |  |  |  |  |  |  |
+| 130,560 |  |  |  |  |  |  |
+
+Useful tokens per verification count only emitted tokens through EOS/cap. Draft acceptance excludes terminal rounds and rounds shortened by the output cap; their counts are retained in the audit. Native pre-clipping counters are diagnostic only.
+
+<!-- eos-throughput:end -->
+
+**Historical EOS limitation:** the tables below measure forced continuation to 512 tokens.
+The audited 8B/32K dense and dense-verifier samples reach EOS at token 8;
+those measurements do not establish natural-generation speedups. The
+[EOS-stopped Multi-LexSum suite](../experiments.html#eos-stopped-workload-suite)
+is now frozen and validated for dense 8B at 32K/64K/128K, batch 1.
+Audited matched-batch results appear above; unfinished cells remain empty.
+
+### Historical measurement protocol
 
 Tokens/s at matched prompts and batch sizes, with 512 fixed output tokens.
 Pool tokens/time within each repetition, then report the median of three
@@ -200,7 +267,7 @@ dense, including output reserve. A 0.9 GPU-memory setting alone does not imply
 KV saturation. Saved baselines and new direct timing use different physical
 B200 hosts; the results are not a same-device paired BF16/MXFP4 experiment.
 
-### Results
+### Historical forced-continuation results
 
 Dense is reported in tokens/s. Every other method is shown as a speedup
 over the same model/context Dense reference: method tokens/s divided by
@@ -277,6 +344,12 @@ reasoning tokens plus 128 answer tokens. Answer-only names the prompting
 protocol; Direct Highlight names the generation method. One question changes
 accuracy by 1.67 percentage points.
 
+CoT's final answer is a separate, short request containing the question,
+choices and generated reasoning, with the document omitted. The 7% rule also
+applies to that request. Its budget can overflow the reserved recent window,
+so these scores do not isolate long-context reasoning quality. See the
+[training-free diagnosis](#training-free-diagnosis) before interpreting this gap.
+
 | Model | Protocol | Indexer | Dense | Direct Highlight | Dense verifier | SV50 | SV40 |
 |---|---|---|---:|---:|---:|---:|---:|
 | 4B | Answer-only | BF16 | 10.00 | 8.33 | 10.00 | 8.33 | 8.33 |
@@ -320,6 +393,76 @@ observed throughput differences, not significance claims. The relative gains
 are consistent with reducing selection cost in a method that refreshes scores
 every step; stage timing alone does not establish the cause of the full
 throughput difference.
+
+### Training-free diagnosis
+
+The [diagnostic artifacts](../../outputs/runs/selector-diagnosis-current.json)
+contain 36 completed captures: both models, the first six existing 32,768-token
+prompts and layers 2/18/35. Each uses the last prefill query, dense FA4 and the
+existing YaRN setting. Normalize native attention separately per query head,
+then average over heads. Values below are means over 18 captures per model.
+
+The native oracle maximizes retained attention mass using the same shared
+16-token blocks, budget and 64-token recency rule. It is an analysis bound,
+not an implementable low-cost selector or a generation-quality result.
+Highlight uses the validated production BF16/MXFP4 kernels. The 7% budget
+floors to 2,288 tokens; 25% uses 8,192.
+
+| Model | Budget | Native oracle mass % | Highlight BF16 mass % | Highlight MXFP4 mass % | BF16 output cosine | MXFP4 output cosine |
+|---|---:|---:|---:|---:|---:|---:|
+| 4B | 7% | 91.98 | 90.42 | 90.31 | 0.9808 | 0.9803 |
+| 4B | 25% | 96.39 | 94.63 | 94.55 | 0.9958 | 0.9957 |
+| 8B | 7% | 88.43 | 85.84 | 85.80 | 0.9712 | 0.9710 |
+| 8B | 25% | 94.54 | 91.88 | 91.87 | 0.9943 | 0.9945 |
+
+At 7%, BF16 ranking loses 1.55 / 2.60 percentage points of native attention
+relative to the constrained oracle; the budget itself excludes 8.02 / 11.57
+points for 4B/8B. Quantization adds 0.11 / 0.04 points of loss on these captures.
+Output cosine compares concatenated attention-head outputs before the output
+projection. These measurements cover one query per prompt at three layers;
+they do not establish agreement throughout generation or at 128K.
+
+The saved CoT outputs reveal a separate short-prompt failure. All counts are
+out of 60; parseable means the existing extractor finds the required answer.
+
+| Model | Dense parseable | BF16 Direct parseable | MXFP4 Direct parseable | MXFP4 answer prompt tokens, min–max | Selected tokens, min–max | Current block omitted on first decode, BF16 / MXFP4 |
+|---|---:|---:|---:|---:|---:|---:|
+| 4B | 60 | 6 | 5 | 325–1,425 | 16–96 | 48 / 48 |
+| 8B | 60 | 14 | 14 | 399–1,576 | 16–96 | 25 / 25 |
+
+The last column is derived from reconstructed prompt lengths and the production
+selection rule. A 64-token recent window spans four or five blocks. If the
+fractional budget is smaller, equal forced scores retain the lowest block IDs
+and omit the current block. For example, 835 cached positions with a 48-token
+budget select blocks 48–50 from reserved blocks 48–52, dropping current block
+52. The production CPU reference reproduces this case. This is a short-budget
+policy defect, not evidence that MXFP4 alone causes the CoT failures.
+
+The authorized [final-answer replay](../../outputs/runs/cot-answer-replay-current.json)
+uses all 60 saved MXFP4 Direct Highlight reasoning outputs per model. Only
+final-answer attention changes to dense. Checkpoint, BF16 weights/KV, static
+YaRN factor 4, template, greedy decoding, 128-token cap and scoring are fixed.
+Three saved dense answers per model replayed exactly before measurement.
+This tests the short-stage policy without regenerating the document reasoning.
+The original scores above remain the original protocol's measurements.
+
+<!-- cot-answer-replay:results:start -->
+| Model | Original correct / 60 | Dense final-stage correct / 60 | Original parseable / 60 | Dense final-stage parseable / 60 |
+|---|---:|---:|---:|---:|
+| 4B | 1 | 10 | 5 | 60 |
+| 8B | 4 | 17 | 14 | 59 |
+<!-- cot-answer-replay:results:end -->
+
+Changing only final-answer attention raises accuracy from 1.67% to 16.67% for
+4B and from 6.67% to 28.33% for 8B. The 4B replay recovers nine answers and
+loses none; 8B recovers fourteen and loses one. This identifies the short-stage
+attention policy as a major source of the original CoT loss. It does not
+separate the effect of recency overflow from that of the small overall budget,
+and does not validate a particular minimum budget or general short-prompt rule.
+No retraining or long-context regeneration was needed. These are separate
+controls, not replacements for the original fixed-7% results or a production
+policy change.
+
 
 ### Boundaries of the evidence
 
@@ -376,12 +519,12 @@ use the audited aggregates; repeated baseline cells represent reused evidence.
 
 | Evidence | Contents |
 |---|---|
-| [BF16 method results](../outputs/worktrees/highlight-spec/outputs/evidence/methods.json) | Throughput repetitions; per-task scores; paired changes and intervals; 392 source hashes |
-| [BF16 audit script](../outputs/worktrees/highlight-spec/outputs/evidence/methods-audit.py) | Method-result aggregation and checks |
-| [Selector comparisons](../outputs/worktrees/highlight-spec/outputs/evidence/selectors.json) | BF16 Highlight, Vegas and TriForce stages; budgets; memory; 123 source hashes |
-| [MXFP4 results](../outputs/worktrees/highlight-spec/outputs/evidence/mxfp4.json) | Quantized method and selector measurements; three throughput repetitions; 282 source hashes |
-| [Replay and rollback checks](../outputs/worktrees/highlight-spec/outputs/evidence/sanity.json) | BF16 correctness probes and numerical limitations |
-| [Output agreement](../outputs/worktrees/highlight-spec/outputs/evidence/eos-agreement.json) | BF16 dense-verifier versus dense sequences |
+| [BF16 method results](../../outputs/worktrees/highlight-spec/outputs/evidence/methods.json) | Throughput repetitions; per-task scores; paired changes and intervals; 392 source hashes |
+| [BF16 audit script](../../outputs/worktrees/highlight-spec/outputs/evidence/methods-audit.py) | Method-result aggregation and checks |
+| [Selector comparisons](../../outputs/worktrees/highlight-spec/outputs/evidence/selectors.json) | BF16 Highlight, Vegas and TriForce stages; budgets; memory; 123 source hashes |
+| [MXFP4 results](../../outputs/worktrees/highlight-spec/outputs/evidence/mxfp4.json) | Quantized method and selector measurements; three throughput repetitions; 282 source hashes |
+| [Replay and rollback checks](../../outputs/worktrees/highlight-spec/outputs/evidence/sanity.json) | BF16 correctness probes and numerical limitations |
+| [Output agreement](../../outputs/worktrees/highlight-spec/outputs/evidence/eos-agreement.json) | BF16 dense-verifier versus dense sequences |
 
 ## 7. Appendix
 
@@ -501,7 +644,7 @@ separate observations even when rounded values coincide.
 
 INT4 drafting, early Spot/Vegas pilots, old batch sweeps and earlier
 YaRN/thinking settings are development evidence. The [earlier Vegas throughput
-comparison](../outputs/worktrees/highlight-spec/outputs/evidence/chapter.json) used different runtimes and is
+comparison](../../outputs/worktrees/highlight-spec/outputs/evidence/chapter.json) used different runtimes and is
 excluded from the main comparison. Earlier acceptance probes have an unresolved
 serving/probe ranking gap. Detailed legacy notes and artifacts remain in the
-[development archive](../outputs/archive/development.tar.gz).
+[development archive](../../outputs/archive/development.tar.gz).

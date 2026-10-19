@@ -99,9 +99,11 @@ ignored; timing ends at the first finished request, before the batch shrinks.
 The runner rejects preemption and incomplete decode steps. Async scheduling is
 disabled for every mode. Use separate output directories for latency and batch
 measurements. Batch token files include prompt slots so repeated questions can
-be rescored correctly. The capacity search, shared-batch comparison, and each
-method's fastest-batch comparison are defined in [experiments.md](notes/experiments.md).
-These new batch measurements still require runtime validation before collecting results.
+be rescored correctly. The current EOS-respecting protocol and matched-batch
+definitions are in [Setup & Method](notes/experiments.html#setup-study).
+The [main results](notes/experiments.html#main-study) distinguish matched-batch measurements
+from historical capacity sweeps.
+The legacy runner described here is separate from that current protocol.
 
 Output comparisons report divergence separately; controlled tests still
 check equality. `--draft-weights target` selects an unquantized draft for
