@@ -742,12 +742,12 @@
           </section>
           <section class="section" id="main-run-protocol">
             <div class="section-heading"><div><div class="section-number">06</div>
-              <h2>Main Results run protocol</h2></div><span class="tag">4B · 32K first · GPUs 0–3</span></div>
-            <p>Current throughput run: Qwen3-4B, 32,768 input tokens. Eight hierarchical methods use
+              <h2>Main Results run protocol</h2></div><span class="tag">4B → 8B · 32K / 64K / 128K</span></div>
+            <p>Throughput grid: Qwen3-4B and Qwen3-8B at 32,768, 65,536 and 130,560 input tokens. Each model/context cell runs the following counts. Eight hierarchical methods use
               the validated FA4 backend, shared BF16 weights and indexer, six drafts and 7% Highlight
               selection. Verification reads both cache planes, densely or at 50% / 40% / 25%.
               Direct Highlight with native FP8 completes the nine-method comparison.</p>
-            <div class="table-wrap static-table" tabindex="0" role="region" aria-label="Current throughput run count">
+            <div class="table-wrap static-table" tabindex="0" role="region" aria-label="Throughput run count per model and context">
               <table><thead><tr><th>Stage</th><th>Scope</th><th class="num">Jobs</th></tr></thead><tbody>
                 <tr><th>Capacity calibration</th><td>4B / 32K × 8 hierarchical methods; adaptive fresh-engine search</td><td class="num">8</td></tr>
                 <tr><th>Hierarchical throughput</th><td>8 methods × 3 fresh process repetitions</td><td class="num">24</td></tr>
@@ -774,7 +774,7 @@
             <p class="inline-definition">B200-1 GPUs 0–3 are authorized for calibration. Dispatch requires 60 seconds idle, cooperative
               locks and one job per GPU. The three timing repetitions use GPUs 2, 3 and 0, respectively,
               across all methods, including native FP8. This permits three concurrent timing runs with paired controls.
-              Failures stop new dispatch. Other models, contexts and quality workloads are outside this queue.
+              Failures stop new dispatch. The grid runs 4B first, then 8B. Quality workloads are outside this queue. A killed job, failed audit or outside GPU workload stops further dispatch; restarting requires explicit user instruction.
               <a href="#hierarchical-native-loader">FA4 implementation validation</a>.</p>
           </section>
         </article>
@@ -871,43 +871,43 @@
                     <th scope="row">4B</th>
                     <td class="num">32K</td>
                     <td class="num">42</td>
-                    <td class="num baseline" title="Three process rates: 234.29, 234.13, 234.33 tokens/s; batch 42; repetitions on GPUs 2, 3, 0">234.29</td>
-                    <td class="num speedup" data-speedup="5.237×" data-absolute="1,226.85" title="Three process rates: 1,223.84, 1,237.27, 1,226.85 tokens/s; batch 42; repetitions on GPUs 2, 3, 0">5.237×</td>
-                    <td class="num speedup" data-cache="native-fp8" data-speedup="11.097×" data-absolute="2,599.77" title="Three process rates: 2,597.62, 2,599.77, 2,604.09 tokens/s; batch 42; repetitions on GPUs 2, 3, 0">11.097×</td>
-                    <td class="num speedup" data-speedup="1.077×" data-absolute="252.25" title="Three process rates: 252.25, 251.98, 252.59 tokens/s; batch 42; repetitions on GPUs 2, 3, 0">1.077×</td>
-                    <td class="num speedup" data-speedup="3.058×" data-absolute="716.47" title="Three process rates: 720.22, 716.47, 714.97 tokens/s; batch 42; repetitions on GPUs 2, 3, 0">3.058×</td>
-                    <td class="num speedup" data-speedup="3.169×" data-absolute="742.48" title="Three process rates: 742.48, 743.14, 736.56 tokens/s; batch 42; repetitions on GPUs 2, 3, 0">3.169×</td>
-                    <td class="num speedup" data-speedup="3.705×" data-absolute="868.09" title="Three process rates: 868.09, 868.75, 860.69 tokens/s; batch 42; repetitions on GPUs 2, 3, 0">3.705×</td>
-                    <td class="num speedup" data-speedup="4.024×" data-absolute="942.88" title="Three process rates: 941.76, 953.29, 942.88 tokens/s; batch 42; repetitions on GPUs 2, 3, 0">4.024×</td>
-                    <td class="num speedup" data-speedup="4.709×" data-absolute="1,103.21" title="Three process rates: 1,101.32, 1,118.32, 1,103.21 tokens/s; batch 42; repetitions on GPUs 2, 3, 0">4.709×</td>
+                    <td class="num baseline" title="Three process rates: 236.54, 236.40, 236.74 tokens/s; batch 42; repetitions on GPUs 2, 3, 0">236.54</td>
+                    <td class="num speedup" data-speedup="5.873×" data-absolute="1,389.15" title="Three process rates: 1,389.15, 1,408.62, 1,387.20 tokens/s; batch 42; repetitions on GPUs 2, 3, 0">5.873×</td>
+                    <td class="num speedup" data-cache="native-fp8" data-speedup="10.991×" data-absolute="2,599.95" title="Three process rates: 2,597.75, 2,599.95, 2,607.04 tokens/s; batch 42; repetitions on GPUs 2, 3, 0">10.991×</td>
+                    <td class="num speedup" data-speedup="1.075×" data-absolute="254.31" title="Three process rates: 254.31, 254.07, 254.60 tokens/s; batch 42; repetitions on GPUs 2, 3, 0">1.075×</td>
+                    <td class="num speedup" data-speedup="3.280×" data-absolute="775.79" title="Three process rates: 777.28, 775.79, 770.87 tokens/s; batch 42; repetitions on GPUs 2, 3, 0">3.280×</td>
+                    <td class="num speedup" data-speedup="3.354×" data-absolute="793.38" title="Three process rates: 792.73, 800.43, 793.38 tokens/s; batch 42; repetitions on GPUs 2, 3, 0">3.354×</td>
+                    <td class="num speedup" data-speedup="4.323×" data-absolute="1,022.53" title="Three process rates: 1,020.69, 1,033.84, 1,022.53 tokens/s; batch 42; repetitions on GPUs 2, 3, 0">4.323×</td>
+                    <td class="num speedup" data-speedup="4.737×" data-absolute="1,120.45" title="Three process rates: 1,118.99, 1,133.99, 1,120.45 tokens/s; batch 42; repetitions on GPUs 2, 3, 0">4.737×</td>
+                    <td class="num speedup" data-speedup="5.522×" data-absolute="1,306.12" title="Three process rates: 1,305.81, 1,326.44, 1,306.12 tokens/s; batch 42; repetitions on GPUs 2, 3, 0">5.522×</td>
                   </tr>
                   <tr data-result-row="" data-model="4b" data-context="64k">
                     <th scope="row">4B</th>
                     <td class="num">64K</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na" data-cache="native-fp8">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
+                    <td class="num">21</td>
+                    <td class="num baseline" title="Three process rates: 89.76, 89.85, 89.90 tokens/s; batch 21; repetitions on GPUs 2, 3, 0">89.85</td>
+                    <td class="num speedup" data-speedup="6.911×" data-absolute="620.94" title="Three process rates: 620.94, 620.40, 621.86 tokens/s; batch 21; repetitions on GPUs 2, 3, 0">6.911×</td>
+                    <td class="num speedup" data-cache="native-fp8" data-speedup="14.422×" data-absolute="1,295.80" title="Three process rates: 1,295.80, 1,298.15, 1,294.73 tokens/s; batch 21; repetitions on GPUs 2, 3, 0">14.422×</td>
+                    <td class="num speedup" data-speedup="1.075×" data-absolute="96.56" title="Three process rates: 96.64, 96.56, 96.55 tokens/s; batch 21; repetitions on GPUs 2, 3, 0">1.075×</td>
+                    <td class="num speedup" data-speedup="3.456×" data-absolute="310.55" title="Three process rates: 310.39, 312.79, 310.55 tokens/s; batch 21; repetitions on GPUs 2, 3, 0">3.456×</td>
+                    <td class="num speedup" data-speedup="3.540×" data-absolute="318.08" title="Three process rates: 317.94, 320.46, 318.08 tokens/s; batch 21; repetitions on GPUs 2, 3, 0">3.540×</td>
+                    <td class="num speedup" data-speedup="4.716×" data-absolute="423.71" title="Three process rates: 423.39, 427.90, 423.71 tokens/s; batch 21; repetitions on GPUs 2, 3, 0">4.716×</td>
+                    <td class="num speedup" data-speedup="5.226×" data-absolute="469.54" title="Three process rates: 469.23, 474.95, 469.54 tokens/s; batch 21; repetitions on GPUs 2, 3, 0">5.226×</td>
+                    <td class="num speedup" data-speedup="6.272×" data-absolute="563.49" title="Three process rates: 563.49, 570.97, 563.27 tokens/s; batch 21; repetitions on GPUs 2, 3, 0">6.272×</td>
                   </tr>
                   <tr data-result-row="" data-model="4b" data-context="128k">
                     <th scope="row">4B</th>
                     <td class="num">128K</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na" data-cache="native-fp8">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
+                    <td class="num">10</td>
+                    <td class="num baseline" title="Three process rates: 42.99, 43.02, 43.08 tokens/s; batch 10; repetitions on GPUs 2, 3, 0">43.02</td>
+                    <td class="num speedup" data-speedup="7.136×" data-absolute="307.00" title="Three process rates: 306.87, 307.00, 307.18 tokens/s; batch 10; repetitions on GPUs 2, 3, 0">7.136×</td>
+                    <td class="num speedup" data-cache="native-fp8" data-speedup="14.952×" data-absolute="643.25" title="Three process rates: 641.01, 643.73, 643.25 tokens/s; batch 10; repetitions on GPUs 2, 3, 0">14.952×</td>
+                    <td class="num speedup" data-speedup="1.046×" data-absolute="45.01" title="Three process rates: 45.01, 44.90, 45.04 tokens/s; batch 10; repetitions on GPUs 2, 3, 0">1.046×</td>
+                    <td class="num speedup" data-speedup="3.156×" data-absolute="135.78" title="Three process rates: 135.78, 135.55, 135.95 tokens/s; batch 10; repetitions on GPUs 2, 3, 0">3.156×</td>
+                    <td class="num speedup" data-speedup="3.266×" data-absolute="140.52" title="Three process rates: 140.32, 141.27, 140.52 tokens/s; batch 10; repetitions on GPUs 2, 3, 0">3.266×</td>
+                    <td class="num speedup" data-speedup="4.542×" data-absolute="195.39" title="Three process rates: 195.32, 195.39, 197.59 tokens/s; batch 10; repetitions on GPUs 2, 3, 0">4.542×</td>
+                    <td class="num speedup" data-speedup="5.204×" data-absolute="223.87" title="Three process rates: 221.30, 223.87, 224.00 tokens/s; batch 10; repetitions on GPUs 2, 3, 0">5.204×</td>
+                    <td class="num speedup" data-speedup="6.167×" data-absolute="265.29" title="Three process rates: 265.11, 265.29, 268.90 tokens/s; batch 10; repetitions on GPUs 2, 3, 0">6.167×</td>
                   </tr>
                   <tr
                     class="group-start"
@@ -917,56 +917,56 @@
                   >
                     <th scope="row">8B</th>
                     <td class="num">32K</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na" data-cache="native-fp8">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
+                    <td class="num">39</td>
+                    <td class="num baseline" title="Three process rates: 218.64, 218.36, 218.69 tokens/s; batch 39; repetitions on GPUs 2, 3, 0">218.64</td>
+                    <td class="num speedup" data-speedup="5.794×" data-absolute="1,266.84" title="Three process rates: 1,281.34, 1,262.42, 1,266.84 tokens/s; batch 39; repetitions on GPUs 2, 3, 0">5.794×</td>
+                    <td class="num speedup" data-cache="native-fp8" data-speedup="10.601×" data-absolute="2,317.71" title="Three process rates: 2,322.18, 2,307.12, 2,317.71 tokens/s; batch 39; repetitions on GPUs 2, 3, 0">10.601×</td>
+                    <td class="num speedup" data-speedup="1.084×" data-absolute="236.96" title="Three process rates: 236.96, 236.85, 236.98 tokens/s; batch 39; repetitions on GPUs 2, 3, 0">1.084×</td>
+                    <td class="num speedup" data-speedup="3.225×" data-absolute="705.12" title="Three process rates: 705.82, 705.12, 701.79 tokens/s; batch 39; repetitions on GPUs 2, 3, 0">3.225×</td>
+                    <td class="num speedup" data-speedup="3.311×" data-absolute="723.87" title="Three process rates: 724.46, 723.87, 718.67 tokens/s; batch 39; repetitions on GPUs 2, 3, 0">3.311×</td>
+                    <td class="num speedup" data-speedup="4.241×" data-absolute="927.18" title="Three process rates: 936.08, 924.61, 927.18 tokens/s; batch 39; repetitions on GPUs 2, 3, 0">4.241×</td>
+                    <td class="num speedup" data-speedup="4.656×" data-absolute="1,017.88" title="Three process rates: 1,028.80, 1,014.92, 1,017.88 tokens/s; batch 39; repetitions on GPUs 2, 3, 0">4.656×</td>
+                    <td class="num speedup" data-speedup="5.466×" data-absolute="1,195.01" title="Three process rates: 1,210.55, 1,192.29, 1,195.01 tokens/s; batch 39; repetitions on GPUs 2, 3, 0">5.466×</td>
                   </tr>
                   <tr data-result-row="" data-model="8b" data-context="64k">
                     <th scope="row">8B</th>
                     <td class="num">64K</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na" data-cache="native-fp8">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
+                    <td class="num">19</td>
+                    <td class="num baseline" title="Three process rates: 81.03, 81.01, 81.06 tokens/s; batch 19; repetitions on GPUs 2, 3, 0">81.03</td>
+                    <td class="num speedup" data-speedup="6.882×" data-absolute="557.68" title="Three process rates: 562.00, 555.67, 557.68 tokens/s; batch 19; repetitions on GPUs 2, 3, 0">6.882×</td>
+                    <td class="num speedup" data-cache="native-fp8" data-speedup="14.030×" data-absolute="1,136.84" title="Three process rates: 1,133.18, 1,136.84, 1,139.38 tokens/s; batch 19; repetitions on GPUs 2, 3, 0">14.030×</td>
+                    <td class="num speedup" data-speedup="1.085×" data-absolute="87.90" title="Three process rates: 87.95, 87.86, 87.90 tokens/s; batch 19; repetitions on GPUs 2, 3, 0">1.085×</td>
+                    <td class="num speedup" data-speedup="3.483×" data-absolute="282.23" title="Three process rates: 282.23, 282.17, 282.57 tokens/s; batch 19; repetitions on GPUs 2, 3, 0">3.483×</td>
+                    <td class="num speedup" data-speedup="3.615×" data-absolute="292.91" title="Three process rates: 292.69, 294.86, 292.91 tokens/s; batch 19; repetitions on GPUs 2, 3, 0">3.615×</td>
+                    <td class="num speedup" data-speedup="4.766×" data-absolute="386.18" title="Three process rates: 385.82, 386.18, 386.79 tokens/s; batch 19; repetitions on GPUs 2, 3, 0">4.766×</td>
+                    <td class="num speedup" data-speedup="5.229×" data-absolute="423.66" title="Three process rates: 423.28, 423.66, 424.38 tokens/s; batch 19; repetitions on GPUs 2, 3, 0">5.229×</td>
+                    <td class="num speedup" data-speedup="6.276×" data-absolute="508.57" title="Three process rates: 507.42, 508.57, 509.50 tokens/s; batch 19; repetitions on GPUs 2, 3, 0">6.276×</td>
                   </tr>
                   <tr data-result-row="" data-model="8b" data-context="128k">
                     <th scope="row">8B</th>
                     <td class="num">128K</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na" data-cache="native-fp8">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
-                    <td class="num na">N/A</td>
+                    <td class="num">9</td>
+                    <td class="num baseline" title="Three process rates: 74.73, 74.68, 74.76 tokens/s; batch 9; repetitions on GPUs 2, 3, 0">74.73</td>
+                    <td class="num speedup" data-speedup="5.120×" data-absolute="382.57" title="Three process rates: 382.27, 382.57, 382.67 tokens/s; batch 9; repetitions on GPUs 2, 3, 0">5.120×</td>
+                    <td class="num speedup" data-cache="native-fp8" data-speedup="8.181×" data-absolute="611.37" title="Three process rates: 611.37, 609.61, 614.30 tokens/s; batch 9; repetitions on GPUs 2, 3, 0">8.181×</td>
+                    <td class="num speedup" data-speedup="1.058×" data-absolute="79.07" title="Three process rates: 79.10, 79.07, 78.96 tokens/s; batch 9; repetitions on GPUs 2, 3, 0">1.058×</td>
+                    <td class="num speedup" data-speedup="2.712×" data-absolute="202.68" title="Three process rates: 202.68, 202.67, 202.96 tokens/s; batch 9; repetitions on GPUs 2, 3, 0">2.712×</td>
+                    <td class="num speedup" data-speedup="2.797×" data-absolute="209.04" title="Three process rates: 208.90, 209.04, 209.42 tokens/s; batch 9; repetitions on GPUs 2, 3, 0">2.797×</td>
+                    <td class="num speedup" data-speedup="3.760×" data-absolute="280.98" title="Three process rates: 280.81, 280.98, 281.30 tokens/s; batch 9; repetitions on GPUs 2, 3, 0">3.760×</td>
+                    <td class="num speedup" data-speedup="4.108×" data-absolute="306.98" title="Three process rates: 306.94, 306.98, 307.56 tokens/s; batch 9; repetitions on GPUs 2, 3, 0">4.108×</td>
+                    <td class="num speedup" data-speedup="4.726×" data-absolute="353.17" title="Three process rates: 352.54, 353.17, 353.31 tokens/s; batch 9; repetitions on GPUs 2, 3, 0">4.726×</td>
                   </tr>
                 </tbody>
               </table>
             </div>
             <p class="inline-definition" id="main-campaign-status">
-              <strong>4B / 32K complete:</strong> all eight capacity searches and 27 timing processes
-              passed their audits. Common batch: 42. Each method has three fresh process repetitions,
-              paired on GPUs 2, 3 and 0. Speedups are ratios of unrounded throughput medians to dense
-              4+4-bit AR; native FP8 uses the same prompts, batch and GPU pairing.
-              Other model/context cells remain N/A.
-              <a href="#main-run-protocol">Protocol</a>
-              · <a href="../outputs/worktrees/highlight-spec/outputs/evidence/hierarchical-current-campaign.json">Validation and campaign record</a>.</p>
+              <strong>Updated-loader throughput: complete.</strong> 6/6 model/context cells audited and published.
+              All requested throughput cells are complete.
+              Nine methods, three fresh process runs per cell, one common-capacity batch per process.
+              Speedups use the matched dense 4+4-bit AR median; native FP8 uses the same prompts, batch and GPU pairing.
+              <a href="#main-run-protocol">Protocol</a> ·
+              <a href="../outputs/worktrees/highlight-spec/outputs/evidence/hierarchical-grid-results.json">Audited results</a> ·
+              <a href="../outputs/worktrees/highlight-spec/outputs/evidence/hierarchical-grid-campaign.json">Queue and dispatch guard</a>.</p>
             <p id="native-fp8-validation" class="inline-definition">
               <strong>Native FP8 validation passed:</strong> 4B/8B at 32K/128K,
               batch 2, 32 output tokens. Eager and CUDA-graph outputs matched;
@@ -1019,7 +1019,7 @@
                         <td class="num">—</td>
                         <td class="num">—</td>
                         <td class="num">162.54</td>
-                        <td class="num">234.29 / 234.13 / 234.33</td>
+                        <td class="num">236.54 / 236.40 / 236.74</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1033,7 +1033,7 @@
                         <td class="num">—</td>
                         <td class="num">—</td>
                         <td class="num">161.57</td>
-                        <td class="num">1,223.84 / 1,237.27 / 1,226.85</td>
+                        <td class="num">1,389.15 / 1,408.62 / 1,387.20</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1047,7 +1047,7 @@
                         <td class="num">—</td>
                         <td class="num">—</td>
                         <td class="num">160.56</td>
-                        <td class="num">2,597.62 / 2,599.77 / 2,604.09</td>
+                        <td class="num">2,597.75 / 2,599.95 / 2,607.04</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1061,7 +1061,7 @@
                         <td class="num">93.40%</td>
                         <td class="num">6.604</td>
                         <td class="num">162.81</td>
-                        <td class="num">252.25 / 251.98 / 252.59</td>
+                        <td class="num">254.31 / 254.07 / 254.60</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1075,7 +1075,7 @@
                         <td class="num">81.64%</td>
                         <td class="num">5.899</td>
                         <td class="num">161.74</td>
-                        <td class="num">720.22 / 716.47 / 714.97</td>
+                        <td class="num">777.28 / 775.79 / 770.87</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1089,7 +1089,7 @@
                         <td class="num">80.75%</td>
                         <td class="num">5.845</td>
                         <td class="num">161.74</td>
-                        <td class="num">742.48 / 743.14 / 736.56</td>
+                        <td class="num">792.73 / 800.43 / 793.38</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1103,7 +1103,7 @@
                         <td class="num">81.83%</td>
                         <td class="num">5.908</td>
                         <td class="num">161.74</td>
-                        <td class="num">868.09 / 868.75 / 860.69</td>
+                        <td class="num">1,020.69 / 1,033.84 / 1,022.53</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1117,7 +1117,7 @@
                         <td class="num">82.51%</td>
                         <td class="num">5.950</td>
                         <td class="num">161.74</td>
-                        <td class="num">941.76 / 953.29 / 942.88</td>
+                        <td class="num">1,118.99 / 1,133.99 / 1,120.45</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1131,7 +1131,7 @@
                         <td class="num">83.10%</td>
                         <td class="num">5.986</td>
                         <td class="num">161.74</td>
-                        <td class="num">1,101.32 / 1,118.32 / 1,103.21</td>
+                        <td class="num">1,305.81 / 1,326.44 / 1,306.12</td>
                       </tr>
                       <tr
                         class="group-start"
@@ -1143,10 +1143,10 @@
                         <td>4B</td>
                         <td>64K</td>
                         <th scope="row">Full-context AR · 4+4-bit KV</th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">—</td>
+                        <td class="num">—</td>
+                        <td class="num">164.50</td>
+                        <td class="num">89.76 / 89.85 / 89.90</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1157,10 +1157,10 @@
                         <td>4B</td>
                         <td>64K</td>
                         <th scope="row">Highlight 7% AR · 4+4-bit KV</th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">—</td>
+                        <td class="num">—</td>
+                        <td class="num">162.58</td>
+                        <td class="num">620.94 / 620.40 / 621.86</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1171,10 +1171,10 @@
                         <td>4B</td>
                         <td>64K</td>
                         <th scope="row">Highlight 7% AR · Native FP8 KV</th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">—</td>
+                        <td class="num">—</td>
+                        <td class="num">160.47</td>
+                        <td class="num">1,295.80 / 1,298.15 / 1,294.73</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1185,10 +1185,10 @@
                         <td>4B</td>
                         <td>64K</td>
                         <th scope="row">Full-context draft · 4-bit KV<small>Verifier: full</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">92.74%</td>
+                        <td class="num">6.562</td>
+                        <td class="num">164.77</td>
+                        <td class="num">96.64 / 96.56 / 96.55</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1199,10 +1199,10 @@
                         <td>4B</td>
                         <td>64K</td>
                         <th scope="row">Highlight 7% draft · 4+4-bit KV<small>Verifier: full</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">81.88%</td>
+                        <td class="num">5.911</td>
+                        <td class="num">162.81</td>
+                        <td class="num">310.39 / 312.79 / 310.55</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1213,10 +1213,10 @@
                         <td>4B</td>
                         <td>64K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: full</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">79.97%</td>
+                        <td class="num">5.798</td>
+                        <td class="num">162.81</td>
+                        <td class="num">317.94 / 320.46 / 318.08</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1227,10 +1227,10 @@
                         <td>4B</td>
                         <td>64K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: 50%</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">81.72%</td>
+                        <td class="num">5.904</td>
+                        <td class="num">162.81</td>
+                        <td class="num">423.39 / 427.90 / 423.71</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1241,10 +1241,10 @@
                         <td>4B</td>
                         <td>64K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: 40%</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">82.54%</td>
+                        <td class="num">5.949</td>
+                        <td class="num">162.81</td>
+                        <td class="num">469.23 / 474.95 / 469.54</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1255,10 +1255,10 @@
                         <td>4B</td>
                         <td>64K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: 25%</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">84.29%</td>
+                        <td class="num">6.057</td>
+                        <td class="num">162.81</td>
+                        <td class="num">563.49 / 570.97 / 563.27</td>
                       </tr>
                       <tr
                         class="group-start"
@@ -1270,10 +1270,10 @@
                         <td>4B</td>
                         <td>128K</td>
                         <th scope="row">Full-context AR · 4+4-bit KV</th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">—</td>
+                        <td class="num">—</td>
+                        <td class="num">168.59</td>
+                        <td class="num">42.99 / 43.02 / 43.08</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1284,10 +1284,10 @@
                         <td>4B</td>
                         <td>128K</td>
                         <th scope="row">Highlight 7% AR · 4+4-bit KV</th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">—</td>
+                        <td class="num">—</td>
+                        <td class="num">164.76</td>
+                        <td class="num">306.87 / 307.00 / 307.18</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1298,10 +1298,10 @@
                         <td>4B</td>
                         <td>128K</td>
                         <th scope="row">Highlight 7% AR · Native FP8 KV</th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">—</td>
+                        <td class="num">—</td>
+                        <td class="num">160.48</td>
+                        <td class="num">641.01 / 643.73 / 643.25</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1312,10 +1312,10 @@
                         <td>4B</td>
                         <td>128K</td>
                         <th scope="row">Full-context draft · 4-bit KV<small>Verifier: full</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">90.21%</td>
+                        <td class="num">6.413</td>
+                        <td class="num">168.78</td>
+                        <td class="num">45.01 / 44.90 / 45.04</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1326,10 +1326,10 @@
                         <td>4B</td>
                         <td>128K</td>
                         <th scope="row">Highlight 7% draft · 4+4-bit KV<small>Verifier: full</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">72.17%</td>
+                        <td class="num">5.326</td>
+                        <td class="num">164.90</td>
+                        <td class="num">135.78 / 135.55 / 135.95</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1340,10 +1340,10 @@
                         <td>4B</td>
                         <td>128K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: full</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">71.10%</td>
+                        <td class="num">5.267</td>
+                        <td class="num">164.90</td>
+                        <td class="num">140.32 / 141.27 / 140.52</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1354,10 +1354,10 @@
                         <td>4B</td>
                         <td>128K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: 50%</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">76.05%</td>
+                        <td class="num">5.564</td>
+                        <td class="num">164.90</td>
+                        <td class="num">195.32 / 195.39 / 197.59</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1368,10 +1368,10 @@
                         <td>4B</td>
                         <td>128K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: 40%</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">78.64%</td>
+                        <td class="num">5.716</td>
+                        <td class="num">164.90</td>
+                        <td class="num">221.30 / 223.87 / 224.00</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1382,10 +1382,10 @@
                         <td>4B</td>
                         <td>128K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: 25%</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">79.82%</td>
+                        <td class="num">5.786</td>
+                        <td class="num">164.90</td>
+                        <td class="num">265.11 / 265.29 / 268.90</td>
                       </tr>
                       <tr
                         class="group-start"
@@ -1397,10 +1397,10 @@
                         <td>8B</td>
                         <td>32K</td>
                         <th scope="row">Full-context AR · 4+4-bit KV</th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">—</td>
+                        <td class="num">—</td>
+                        <td class="num">161.23</td>
+                        <td class="num">218.64 / 218.36 / 218.69</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1411,10 +1411,10 @@
                         <td>8B</td>
                         <td>32K</td>
                         <th scope="row">Highlight 7% AR · 4+4-bit KV</th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">—</td>
+                        <td class="num">—</td>
+                        <td class="num">161.58</td>
+                        <td class="num">1,281.34 / 1,262.42 / 1,266.84</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1425,10 +1425,10 @@
                         <td>8B</td>
                         <td>32K</td>
                         <th scope="row">Highlight 7% AR · Native FP8 KV</th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">—</td>
+                        <td class="num">—</td>
+                        <td class="num">160.55</td>
+                        <td class="num">2,322.18 / 2,307.12 / 2,317.71</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1439,10 +1439,10 @@
                         <td>8B</td>
                         <td>32K</td>
                         <th scope="row">Full-context draft · 4-bit KV<small>Verifier: full</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">94.11%</td>
+                        <td class="num">6.647</td>
+                        <td class="num">161.52</td>
+                        <td class="num">236.96 / 236.85 / 236.98</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1453,10 +1453,10 @@
                         <td>8B</td>
                         <td>32K</td>
                         <th scope="row">Highlight 7% draft · 4+4-bit KV<small>Verifier: full</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">81.51%</td>
+                        <td class="num">5.890</td>
+                        <td class="num">161.59</td>
+                        <td class="num">705.82 / 705.12 / 701.79</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1467,10 +1467,10 @@
                         <td>8B</td>
                         <td>32K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: full</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">80.36%</td>
+                        <td class="num">5.820</td>
+                        <td class="num">161.59</td>
+                        <td class="num">724.46 / 723.87 / 718.67</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1481,10 +1481,10 @@
                         <td>8B</td>
                         <td>32K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: 50%</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">82.18%</td>
+                        <td class="num">5.930</td>
+                        <td class="num">161.51</td>
+                        <td class="num">936.08 / 924.61 / 927.18</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1495,10 +1495,10 @@
                         <td>8B</td>
                         <td>32K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: 40%</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">83.16%</td>
+                        <td class="num">5.987</td>
+                        <td class="num">161.51</td>
+                        <td class="num">1,028.80 / 1,014.92 / 1,017.88</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1509,10 +1509,10 @@
                         <td>8B</td>
                         <td>32K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: 25%</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">85.14%</td>
+                        <td class="num">6.106</td>
+                        <td class="num">161.51</td>
+                        <td class="num">1,210.55 / 1,192.29 / 1,195.01</td>
                       </tr>
                       <tr
                         class="group-start"
@@ -1524,10 +1524,10 @@
                         <td>8B</td>
                         <td>64K</td>
                         <th scope="row">Full-context AR · 4+4-bit KV</th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">—</td>
+                        <td class="num">—</td>
+                        <td class="num">161.89</td>
+                        <td class="num">81.03 / 81.01 / 81.06</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1538,10 +1538,10 @@
                         <td>8B</td>
                         <td>64K</td>
                         <th scope="row">Highlight 7% AR · 4+4-bit KV</th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">—</td>
+                        <td class="num">—</td>
+                        <td class="num">162.64</td>
+                        <td class="num">562.00 / 555.67 / 557.68</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1552,10 +1552,10 @@
                         <td>8B</td>
                         <td>64K</td>
                         <th scope="row">Highlight 7% AR · Native FP8 KV</th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">—</td>
+                        <td class="num">—</td>
+                        <td class="num">160.52</td>
+                        <td class="num">1,133.18 / 1,136.84 / 1,139.38</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1566,10 +1566,10 @@
                         <td>8B</td>
                         <td>64K</td>
                         <th scope="row">Full-context draft · 4-bit KV<small>Verifier: full</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">93.75%</td>
+                        <td class="num">6.624</td>
+                        <td class="num">162.17</td>
+                        <td class="num">87.95 / 87.86 / 87.90</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1580,10 +1580,10 @@
                         <td>8B</td>
                         <td>64K</td>
                         <th scope="row">Highlight 7% draft · 4+4-bit KV<small>Verifier: full</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">83.78%</td>
+                        <td class="num">6.024</td>
+                        <td class="num">162.87</td>
+                        <td class="num">282.23 / 282.17 / 282.57</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1594,10 +1594,10 @@
                         <td>8B</td>
                         <td>64K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: full</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">82.98%</td>
+                        <td class="num">5.978</td>
+                        <td class="num">162.87</td>
+                        <td class="num">292.69 / 294.86 / 292.91</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1608,10 +1608,10 @@
                         <td>8B</td>
                         <td>64K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: 50%</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">84.14%</td>
+                        <td class="num">6.047</td>
+                        <td class="num">162.87</td>
+                        <td class="num">385.82 / 386.18 / 386.79</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1622,10 +1622,10 @@
                         <td>8B</td>
                         <td>64K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: 40%</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">84.06%</td>
+                        <td class="num">6.042</td>
+                        <td class="num">162.87</td>
+                        <td class="num">423.28 / 423.66 / 424.38</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1636,10 +1636,10 @@
                         <td>8B</td>
                         <td>64K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: 25%</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">86.24%</td>
+                        <td class="num">6.173</td>
+                        <td class="num">162.87</td>
+                        <td class="num">507.42 / 508.57 / 509.50</td>
                       </tr>
                       <tr
                         class="group-start"
@@ -1651,10 +1651,10 @@
                         <td>8B</td>
                         <td>128K</td>
                         <th scope="row">Full-context AR · 4+4-bit KV</th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">—</td>
+                        <td class="num">—</td>
+                        <td class="num">163.36</td>
+                        <td class="num">74.73 / 74.68 / 74.76</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1665,10 +1665,10 @@
                         <td>8B</td>
                         <td>128K</td>
                         <th scope="row">Highlight 7% AR · 4+4-bit KV</th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">—</td>
+                        <td class="num">—</td>
+                        <td class="num">164.80</td>
+                        <td class="num">382.27 / 382.57 / 382.67</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1679,10 +1679,10 @@
                         <td>8B</td>
                         <td>128K</td>
                         <th scope="row">Highlight 7% AR · Native FP8 KV</th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">—</td>
+                        <td class="num">—</td>
+                        <td class="num">160.52</td>
+                        <td class="num">611.37 / 609.61 / 614.30</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1693,10 +1693,10 @@
                         <td>8B</td>
                         <td>128K</td>
                         <th scope="row">Full-context draft · 4-bit KV<small>Verifier: full</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">93.91%</td>
+                        <td class="num">6.626</td>
+                        <td class="num">163.51</td>
+                        <td class="num">79.10 / 79.07 / 78.96</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1707,10 +1707,10 @@
                         <td>8B</td>
                         <td>128K</td>
                         <th scope="row">Highlight 7% draft · 4+4-bit KV<small>Verifier: full</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">80.03%</td>
+                        <td class="num">5.801</td>
+                        <td class="num">164.91</td>
+                        <td class="num">202.68 / 202.67 / 202.96</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1721,10 +1721,10 @@
                         <td>8B</td>
                         <td>128K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: full</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">81.07%</td>
+                        <td class="num">5.856</td>
+                        <td class="num">164.91</td>
+                        <td class="num">208.90 / 209.04 / 209.42</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1735,10 +1735,10 @@
                         <td>8B</td>
                         <td>128K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: 50%</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">82.66%</td>
+                        <td class="num">5.957</td>
+                        <td class="num">164.91</td>
+                        <td class="num">280.81 / 280.98 / 281.30</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1749,10 +1749,10 @@
                         <td>8B</td>
                         <td>128K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: 40%</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">82.83%</td>
+                        <td class="num">5.968</td>
+                        <td class="num">164.91</td>
+                        <td class="num">306.94 / 306.98 / 307.56</td>
                       </tr>
                       <tr
                         data-result-row=""
@@ -1763,10 +1763,10 @@
                         <td>8B</td>
                         <td>128K</td>
                         <th scope="row">Highlight 7% draft · 4-bit KV<small>Verifier: 25%</small></th>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
-                        <td class="num na">N/A</td>
+                        <td class="num">82.11%</td>
+                        <td class="num">5.923</td>
+                        <td class="num">164.91</td>
+                        <td class="num">352.54 / 353.17 / 353.31</td>
                       </tr>
                     </tbody>
                   </table>
@@ -1779,7 +1779,7 @@
                   bonus tokens. Memory is the median of per-process peak
                   PyTorch-reserved memory, including the allocated KV pool.
                   <a
-                    href="../outputs/worktrees/highlight-spec/outputs/evidence/hierarchical-current-results.json"
+                    href="../outputs/worktrees/highlight-spec/outputs/evidence/hierarchical-grid-results.json"
                     >Unrounded measurements and raw-result paths</a
                   >.
                 </p>
@@ -1826,26 +1826,33 @@
             <details class="disclosure" id="hierarchical-loader-profile">
               <summary>Packed-loader profile and optimization</summary>
               <div class="disclosure-body">
-                <p>The sparse 4-bit loader spent most producer time reconstructing KV and loading quantization metadata.
-                  Resolving each selected page once per producer group and staging logical positions reduced redundant reads.
-                  Cache format, selected positions and attention arithmetic are unchanged; sparse kernels add 512 bytes of shared memory per CTA. Dense kernels retain their original loader.</p>
+                <p>Each KV head's metadata is contiguous. Attention reuses physical pages emitted by the selector,
+                  resolves group-metadata pages once per tile, and reuses the descriptors for K and V.
+                  Sparse key scales and minima use 128-bit asynchronous copies.
+                  Quantization, selected positions, attention arithmetic and cache updates are unchanged.
+                  The existing scratch allocation is reused; cache bytes, workspace bytes and kernel-launch count are unchanged.</p>
                 <div class="table-wrap static-table" tabindex="0" role="region" aria-label="Packed loader optimization timings">
-                  <table><thead><tr><th scope="col">Attention path</th><th scope="col" class="num">ms / layer</th></tr></thead><tbody>
-                    <tr><th scope="row">Highlight 7% · 4-bit · previous loader</th><td class="num">0.533</td></tr>
-                    <tr><th scope="row">Highlight 7% · 4-bit · updated loader</th><td class="num">0.453<small>14.9% less time · 1.18×</small></td></tr>
-                    <tr><th scope="row">Native BF16 · predecoded 4-bit KV<small>Diagnostic control; decoding excluded</small></th><td class="num">0.104</td></tr>
-                    <tr><th scope="row">Highlight 7% · native FP8</th><td class="num">0.086</td></tr>
+                  <table><thead><tr><th scope="col">Attention path</th><th scope="col" class="num">Before · ms / layer</th><th scope="col" class="num">After · ms / layer<small>Median · process range</small></th><th scope="col" class="num">Less time</th></tr></thead><tbody>
+                    <tr><th scope="row">Highlight 7% draft · 4-bit</th><td class="num">0.453</td><td class="num">0.401<small>0.401–0.401</small></td><td class="num">11.3%</td></tr>
+                    <tr><th scope="row">Highlight 7% AR / draft · 4+4-bit</th><td class="num">0.516</td><td class="num">0.459<small>0.459–0.461</small></td><td class="num">11.1%</td></tr>
+                    <tr><th scope="row">SV50 verifier · 4+4-bit</th><td class="num">3.064</td><td class="num">2.899<small>2.896–2.900</small></td><td class="num">5.4%</td></tr>
+                    <tr><th scope="row">SV40 verifier · 4+4-bit</th><td class="num">2.515</td><td class="num">2.344<small>2.343–2.346</small></td><td class="num">6.8%</td></tr>
+                    <tr><th scope="row">SV25 verifier · 4+4-bit</th><td class="num">1.645</td><td class="num">1.490<small>1.488–1.490</small></td><td class="num">9.4%</td></tr>
                   </tbody></table>
                 </div>
-                <p class="inline-definition">Same 4B/32K/batch-42 attention fixture and cold-cache protocol as above.
-                  Updated loader and FP8: three fresh processes; BF16 control: one process.
-                  All nine attention cases passed reference and graph-replay checks; 17 GPU regressions passed,
-                  including precision boundaries and large cache addresses. The updated loader remains slower than native FP8.
-                  Whole-model throughput and task quality have not been rerun with this update.</p>
-                <p class="inline-definition">Baseline CUDA timeline: 528 µs in hierarchical attention and 5 µs in query preparation/output copying.
-                  Instrumented producer time: reconstruction/shared writes 53%, metadata 29%, packed staging 18%.
-                  These producer intervals overlap other warps. Hardware counters were unavailable because the host denied Nsight access.
-                  <a href="../outputs/worktrees/highlight-spec/outputs/evidence/hierarchical-loader-profile.json">Unrounded results, all nine cases, traces and validation</a>.</p>
+                <p class="inline-definition">Same 4B/32K/batch-42 fixture and cold-cache protocol as above.
+                  Three fresh processes per implementation, paired on GPUs 2 / 3 / 0; 30 graph samples per case and process.
+                  All 27 paired attention outputs were bit-for-bit identical. All nine cases passed storage-reference and graph/eager checks;
+                  32 GPU regressions and 226 CPU checks passed. GPU checks include changed selections during graph replay,
+                  duplicate pages, partial pages, precision boundaries and large cache addresses.
+                  Updated-loader 4B / 32K whole-model throughput is now audited in the main table. Task quality has not been rerun with this update.
+                  <a href="../outputs/worktrees/highlight-spec/outputs/evidence/hierarchical-access.json">Paired timings, source hashes and validation</a>.</p>
+                <p class="inline-definition">Native FP8 measured 0.088 ms/layer in the current comparison.
+                  The earlier native BF16 control using predecoded four-bit values measured 0.104 ms/layer in one process,
+                  with decoding excluded. It materializes a separate diagnostic buffer.
+                  The original producer profile attributed 53% of producer time to reconstruction/shared writes,
+                  29% to metadata and 18% to packed staging; these overlapping intervals precede the current optimization.
+                  <a href="../outputs/worktrees/highlight-spec/outputs/evidence/hierarchical-loader-profile.json">Original traces and control measurements</a>.</p>
               </div>
             </details>
             <p class="inline-definition">Throughput and task quality are separate measurements.
