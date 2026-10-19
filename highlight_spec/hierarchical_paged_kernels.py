@@ -35,7 +35,7 @@ def _store_group(PAGES, META, TABLE, x, group, head, H: tl.constexpr,
     tl.store(PAGES+off+(3 if VALUE else 1)*plane, r)
     # For K, t represents channel; for V it represents token. Both metadata
     # groups occupy eight physical pages without replication.
-    moff = physical*(STRIDE//2)+(2 if VALUE else 0)*16*H+(t%16)*H+head
+    moff = physical*(STRIDE//2)+(2 if VALUE else 0)*16*H+head*16+t%16
     tl.store(META+moff, scale)
     tl.store(META+moff+16*H, minimum)
 
@@ -223,7 +223,7 @@ def _attention(Q, QP, QSL, SLOTS, TABLE, IDS, COUNTS, STATE, PAGES, META, KT, VT
         kc = _unpack_codes(PAGES, code_offset, old[:, None], CONTIGUOUS)
         kpage = tl.load(TABLE+req*TABLE_STRIDE+(pos[:, None]//128)*8+d[None, :]//16,
                         old[:, None], 0).to(tl.int64)
-        km = kpage*(STRIDE//2)+(d[None, :]%16)*H+head
+        km = kpage*(STRIDE//2)+head*16+d[None, :]%16
         ks = tl.load(META+km, old[:, None], 0).to(tl.float32)
         kz = tl.load(META+km+16*H, old[:, None], 0).to(tl.float32)
         k = kc*ks+kz
@@ -240,7 +240,7 @@ def _attention(Q, QP, QSL, SLOTS, TABLE, IDS, COUNTS, STATE, PAGES, META, KT, VT
         alpha = tl.exp(maximum-safe_max)
         prob = tl.exp(score-safe_max[:, None])
         vc = _unpack_codes(PAGES, code_offset+2*plane, old[:, None], CONTIGUOUS)
-        vm = physical*(STRIDE//2)+2*16*H+(pos%16)*H+head
+        vm = physical*(STRIDE//2)+2*16*H+head*16+pos%16
         vs = tl.load(META+vm, old, 0).to(tl.float32)
         vz = tl.load(META+vm+16*H, old, 0).to(tl.float32)
         v = vc*vs[:, None]+vz[:, None]
@@ -342,11 +342,13 @@ def attention_workspace(requests, kv_heads, query_heads, max_queries, max_positi
 
 
 def attention(cache, query, query_positions, query_start_loc, slots, block_table, *, bits=8,
-              selected_ids=None, selected_counts=None, workspace, output=None):
+              selected_ids=None, selected_counts=None, selected_page_table=None,
+              workspace, output=None):
     if workspace.backend == 'fa4':
         from .hierarchical_native import attention as native_attention
         return native_attention(cache, query, query_positions, query_start_loc, slots, block_table,
             bits=bits, selected_ids=selected_ids, selected_counts=selected_counts,
+            selected_page_table=selected_page_table,
             workspace=workspace, output=output)
     n, h, hq, maxq, maxpos = workspace.shape
     if (cache.device.type != "cuda" or bits not in (4, 8) or h != cache.kv_heads

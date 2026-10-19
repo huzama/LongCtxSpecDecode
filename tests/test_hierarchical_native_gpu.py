@@ -70,3 +70,59 @@ def test_native_large_physical_cache_addresses(bits,sparse,queries):
         selected_ids=ids,selected_counts=counts,workspace=ws)
     torch.cuda.synchronize()
     torch.testing.assert_close(actual,expected,rtol=.025,atol=.004)
+
+
+@pytest.mark.parametrize('bits,queries', [(4, 1), (8, 7)])
+def test_native_graph_refreshes_selected_page_descriptors(bits, queries):
+    """A replay must consume new selections, including duplicates and a short page."""
+    from highlight_spec.hierarchical_cache import reference_attention
+    from highlight_spec.hierarchical_paged import PagedHierarchicalKV
+    from highlight_spec.hierarchical_paged_kernels import prefill
+    from highlight_spec.hierarchical_native import NativeAttentionWorkspace, attention
+
+    torch.manual_seed(29)
+    length, heads = 511, 8
+    cache = PagedHierarchicalKV.allocate(32, heads, 1, 'cuda')
+    table = torch.randperm(32, device='cuda', dtype=torch.int32)[None]
+    kv = [torch.randn(length, heads, 128, device='cuda', dtype=torch.bfloat16) for _ in range(2)]
+    prefill(cache, 0, table[0], *kv)
+    q = torch.randn(queries, 32, 128, device='cuda', dtype=torch.bfloat16)
+    positions = torch.arange(length-queries, length, device='cuda')
+    starts = torch.tensor([0, queries], device='cuda', dtype=torch.int32)
+    slots = torch.zeros(1, device='cuda', dtype=torch.int32)
+    ids = torch.tensor([[0, 16, 16, 31, 6]], device='cuda', dtype=torch.int32)
+    counts = torch.tensor([5], device='cuda', dtype=torch.int32)
+    physical_ids = torch.gather(table, 1, ids.long())
+    workspace = NativeAttentionWorkspace(1, heads, 32, queries, 80, 'cuda')
+    output = torch.empty_like(q)
+
+    def call(preselected=True):
+        return attention(cache, q, positions, starts, slots, table, bits=bits,
+                         selected_ids=ids, selected_counts=counts,
+                         selected_page_table=physical_ids if preselected else None,
+                         workspace=workspace, output=output)
+
+    for _ in range(3):
+        call()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        call()
+    for selected in ([0, 16, 16, 31, 6], [31, 2, 2, 17]):
+        ids.fill_(-1)
+        ids[0, :len(selected)] = torch.tensor(selected, device='cuda', dtype=torch.int32)
+        counts.fill_(len(selected))
+        physical_ids.zero_()
+        physical_ids[0, :len(selected)] = table[0, ids[0, :len(selected)].long()]
+        output.fill_(float('nan'))
+        graph.replay()
+        replay = output.clone()
+        call()
+        torch.testing.assert_close(output, replay, rtol=0, atol=0)
+        call(preselected=False)
+        torch.testing.assert_close(output, replay, rtol=0, atol=0)
+        chosen = (torch.tensor(selected, device='cuda')[:, None]*16+
+                  torch.arange(16, device='cuda')).flatten()
+        chosen = chosen[chosen < length]
+        expected = reference_attention(q, *cache.read(0, table[0], bits, chosen),
+                                       positions, chosen)
+        torch.testing.assert_close(replay, expected, rtol=.025, atol=.004)

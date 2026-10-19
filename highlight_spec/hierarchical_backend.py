@@ -270,6 +270,8 @@ class HierarchicalImpl(AttentionImpl):
             md.block_table, bits=c.draft_bits if md.drafting else 8,
             selected_ids=c.selection.ids[:md.num_reqs] if sparse else None,
             selected_counts=c.selection.cnt[:md.num_reqs] if sparse else None,
+            # The selector already resolves physical pages in this same order.
+            selected_page_table=c.selection.cmp_table[:md.num_reqs] if sparse else None,
             workspace=c.workspace(md.num_reqs, 1 if md.max_query_len == 1 else 7, sparse), output=output[:n])
 
 

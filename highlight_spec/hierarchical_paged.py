@@ -73,7 +73,10 @@ class PagedHierarchicalKV:
             (stride, kv_heads*64, 64, 1), pages.storage_offset()+i*layout.plane_bytes)
             for i in range(4)]
         metadata = pages[:, 4*layout.plane_bytes:].view(torch.bfloat16)
-        self.metadata = metadata.view(nb, 4, 16, kv_heads)
+        # Each attention CTA consumes one KV head. Store its sixteen metadata
+        # values together, retaining the diagnostic [page, kind, lane, head]
+        # view and the same number of bytes per page.
+        self.metadata = metadata.view(nb, 4, kv_heads, 16).transpose(2, 3)
 
     @classmethod
     def allocate(cls, num_pages, kv_heads, max_requests, device="cpu"):

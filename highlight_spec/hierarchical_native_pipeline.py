@@ -66,10 +66,12 @@ from .hierarchical_native_loader import HierarchicalKVManager
 
 class HierarchicalAttentionSm100(FlashAttentionForwardSm100):
 
-    def __init__(self, *args, hierarchical_bits, hierarchical_sparse, **kwargs):
+    def __init__(self, *args, hierarchical_bits, hierarchical_sparse,
+                 hierarchical_preselected=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.hierarchical_bits = hierarchical_bits
         self.hierarchical_sparse = hierarchical_sparse
+        self.hierarchical_preselected = hierarchical_preselected
         # Packed reconstruction needs more producer registers than a BF16
         # copy. Preserve the native total register budget across warp groups.
         self.num_regs_softmax = 168
@@ -742,6 +744,7 @@ class HierarchicalAttentionSm100(FlashAttentionForwardSm100):
                     hierarchical_data, hierarchical_scratch, batch_idx, head_idx_kv, tidx,
                     seqlen.seqlen_k, self.n_block_size, num_load_threads,
                     self.hierarchical_bits, self.hierarchical_sparse,
+                    self.hierarchical_preselected,
                 )
                 tKsK, tKgK = None, None
                 tVsV, tVgV = None, None

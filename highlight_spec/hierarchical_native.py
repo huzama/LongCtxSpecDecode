@@ -120,7 +120,7 @@ def _check_runtime():
         raise RuntimeError('FA4 source changed; revalidate the hierarchical pipeline adapter')
 
 
-def _compile(workspace, args, bits, sparse):
+def _compile(workspace, args, bits, sparse, preselected):
     import cutlass
     import cutlass.cute as cute
     from cutlass.cute.runtime import from_dlpack
@@ -162,7 +162,8 @@ def _compile(workspace, args, bits, sparse):
         pack_gqa=True, m_block_size=128, n_block_size=128, q_stage=1,
         is_persistent=False, mask_mod=logical_mask if (sparse or maxq > 1) else None, has_aux_tensors=True,
         paged_kv_non_tma=True, is_varlen_q=True,
-        hierarchical_bits=bits, hierarchical_sparse=sparse)
+        hierarchical_bits=bits, hierarchical_sparse=sparse,
+        hierarchical_preselected=preselected)
     def convert(x):
         if isinstance(x, torch.Tensor):
             return from_dlpack(x, assumed_align=4 if x.dtype in (torch.int32, torch.int64) else 16)
@@ -175,7 +176,8 @@ def _compile(workspace, args, bits, sparse):
 
 
 def attention(cache, query, query_positions, query_start_loc, slots, block_table, *,
-              bits=8, selected_ids=None, selected_counts=None, workspace, output=None):
+              bits=8, selected_ids=None, selected_counts=None, selected_page_table=None,
+              workspace, output=None):
     from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd_combine
     from vllm.vllm_flash_attn.cute.utils import AuxData
     n, h, hq, maxq, _ = workspace.shape
@@ -198,6 +200,11 @@ def attention(cache, query, query_positions, query_start_loc, slots, block_table
     metadata = (query_positions, query_start_loc, slots, block_table)
     if sparse:
         metadata += (selected_ids, selected_counts)
+    preselected = selected_page_table is not None
+    if preselected:
+        if not sparse or selected_page_table.shape != selected_ids.shape:
+            raise ValueError('selected physical pages must match the logical selection shape')
+        metadata += (selected_page_table,)
     for tensor in metadata:
         if (tensor.device != cache.device or tensor.dtype not in (torch.int32, torch.int64)
                 or tensor.stride(-1) != 1):
@@ -216,7 +223,9 @@ def attention(cache, query, query_positions, query_start_loc, slots, block_table
     # These existing BF16 ring views provide native K/V shape/type metadata.
     # The native page loader is overridden and never reads these as context KV.
     kshape, vshape = [x[:, :16] for x in cache.tail]
-    aux = AuxData((cache.pages.view(torch.uint32), cache.metadata, *cache.tail, block_table, ids, info, qp))
+    physical_ids = selected_page_table if preselected else block_table
+    aux = AuxData((cache.pages.view(torch.uint32), cache.metadata, *cache.tail,
+                   block_table, ids, info, qp, physical_ids))
     args = (q, kshape, vshape, partial if workspace.splits > 1 else out,
             lse if workspace.splits > 1 else None, 128**-.5,
             None, None, sq, sk, None, block_table, None, None, None, None, None, aux, None)
@@ -226,11 +235,11 @@ def attention(cache, query, query_positions, query_start_loc, slots, block_table
         if isinstance(x, AuxData):
             return tuple(signature(t) for t in x.tensors)
         return x
-    key = (bits, sparse, tuple(signature(x) for x in args))
+    key = (bits, sparse, preselected, tuple(signature(x) for x in args))
     if key not in workspace.compiled:
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError('native hierarchical attention must be warmed before graph capture')
-        workspace.compiled[key] = _compile(workspace, args, bits, sparse)
+        workspace.compiled[key] = _compile(workspace, args, bits, sparse, preselected)
     workspace.compiled[key](*args)
     if workspace.splits > 1:
         _flash_attn_fwd_combine(partial, lse.transpose(-1, -2), out, seqused=sq)

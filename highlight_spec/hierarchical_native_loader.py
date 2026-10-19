@@ -37,6 +37,7 @@ class HierarchicalKVManager(ParamsBase):
     threads: cutlass.Constexpr[int]
     bits: cutlass.Constexpr[int]
     sparse: cutlass.Constexpr[bool]
+    preselected: cutlass.Constexpr[bool]
 
     @cute.jit
     def load_page_table(self, n_block: Int32):
@@ -46,7 +47,7 @@ class HierarchicalKVManager(ParamsBase):
 
     @cute.jit
     def load_KV(self, n_block: Int32, sX: cute.Tensor, kind: cutlass.Constexpr[str]):
-        pages, meta, kt, vt, table, selected, info, qpos = self.data
+        pages, meta, kt, vt, table, selected, info, qpos, physical_ids = self.data
         slot, prefix, length, req = (info[self.batch, i] for i in range(4))
         heads = kt.shape[2]
         plane = 16 * heads * 64
@@ -62,26 +63,53 @@ class HierarchicalKVManager(ParamsBase):
         # All producers must finish reading the previous packed tile before
         # any producer reuses it. Only these load warps participate.
         ready.arrive_and_wait()
+        if const_expr(self.sparse and kind == "K"):
+            # One descriptor per selected page, shared by K/V loads and all
+            # reconstruction lanes. The existing 512-byte scratch holds eight
+            # logical bases, eight physical pages and 8x8 key-metadata pages.
+            if self.thread < 64:
+                pg, shard = self.thread//8, self.thread%8
+                index = n_block*self.tile_n+pg*16
+                valid = (n_block >= 0) & (index < self.seqlen) & (slot >= 0)
+                logical = Int32(-1)
+                if valid:
+                    logical = selected[req, index//16]
+                pos = logical*16
+                valid = valid & (pos >= 0) & (pos < length)
+                old = valid & (pos < prefix)
+                physical, metadata_page = Int32(0), Int32(0)
+                if old:
+                    if const_expr(self.preselected):
+                        physical = Int32(physical_ids[req, index//16])
+                    else:
+                        physical = Int32(table[req, logical])
+                    metadata_page = Int32(table[req, (pos//128)*8+shard])
+                if shard == 0:
+                    logical_tile[pg] = pos if valid else Int32(-1)
+                    logical_tile[8+pg] = physical
+                logical_tile[16+pg*8+shard] = metadata_page
+            ready.arrive_and_wait()
         async_atom = cute.make_copy_atom(
             cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL),
             cutlass.Uint32, num_bits_per_copy=128)
         predicate = cute.make_rmem_tensor((4,), cutlass.Boolean)
         for row in cutlass.range_constexpr(self.tile_n // (self.threads // 4)):
             t = row * (self.threads // 4) + self.thread // 4
-            index = n_block * self.tile_n + t
-            logical = index // 16
-            valid = (n_block >= 0) & (index < self.seqlen) & (slot >= 0)
             if const_expr(self.sparse):
-                if valid:
-                    logical = selected[req, logical]
-            pos = logical * 16 + index % 16
-            old = valid & (pos >= 0) & (pos < prefix) & (pos < length)
-            # Dense allocations exceed 4 GiB per layer. Promote the physical
-            # index before multiplying by a tensor stride, including the
-            # BF16 metadata view whose element offsets can exceed 2**31.
-            physical = Int64(0)
-            if old:
-                physical = Int64(table[req, pos // 16])
+                base = logical_tile[t//16]
+                pos = base+t%16
+                valid = (base >= 0) & (pos < length)
+                old = valid & (pos < prefix)
+                physical = Int64(logical_tile[8+t//16])
+            else:
+                index = n_block * self.tile_n + t
+                pos = index
+                valid = (n_block >= 0) & (index < self.seqlen) & (slot >= 0)
+                old = valid & (pos >= 0) & (pos < prefix) & (pos < length)
+                # Promote before multiplying by a possibly >4 GiB stride.
+                physical = Int64(0)
+                if old:
+                    physical = Int64(table[req, pos // 16])
             d = (self.thread % 4) * 4
             off = (pos % 16 * heads + self.head) * 16 + d
             if const_expr(kind == "V"):
@@ -97,45 +125,33 @@ class HierarchicalKVManager(ParamsBase):
                 cute.copy(async_atom, src, dst, pred=predicate)
         cute.arch.cp_async_commit_group()
 
-        if const_expr(self.sparse):
-            # Resolve each reconstruction row once while its metadata is staged.
-            index = n_block*self.tile_n+self.thread
-            valid = (n_block >= 0) & (index < self.seqlen) & (slot >= 0)
-            logical = index//16
-            if const_expr(self.sparse):
-                if valid:
-                    logical = selected[req,logical]
-            pos = logical*16+index%16
-            logical_tile[self.thread] = pos if valid & (pos >= 0) & (pos < length) else Int32(-1)
-
         # Collect each scale/minimum once per tile (once per selected page for
         # sparse K). Reconstruction then uses shared reads, avoiding a serial
         # global-metadata dependency for every decoded token.
         if const_expr(kind == "K"):
             if const_expr(self.sparse):
-                pg = self.thread//16 if const_expr(self.sparse) else 0
-                lane = self.thread%16 if const_expr(self.sparse) else self.thread
-                index = n_block*self.tile_n+pg*16
-                logical = index//16
-                valid = (n_block >= 0) & (index < self.seqlen) & (slot >= 0)
-                if const_expr(self.sparse):
-                    if valid:
-                        logical = selected[req,logical]
-                pos = logical*16
-                old = valid & (pos >= 0) & (pos < prefix) & (pos < length)
-                # Each producer group resolves one selected page and then loads
-                # its channels. Keep the shared layout used by reconstruction.
-                if old:
-                    for group in cutlass.range_constexpr(8 if self.sparse else 1):
-                        d = lane+group*16
-                        mp = Int64(table[req,(pos//128)*8+d//16])
-                        metadata_tile[pg,0,d]=meta[mp,0,d%16,self.head]
-                        metadata_tile[pg,1,d]=meta[mp,1,d%16,self.head]
-                else:
-                    for group in cutlass.range_constexpr(8 if self.sparse else 1):
-                        d = lane+group*16
-                        metadata_tile[pg,0,d]=cutlass.BFloat16(0.)
-                        metadata_tile[pg,1,d]=cutlass.BFloat16(0.)
+                pg, lane = self.thread//16, self.thread%16
+                pos = logical_tile[pg]
+                old = (pos >= 0) & (pos < prefix)
+                d = lane*8
+                sparse_meta_page = Int64(logical_tile[16+pg*8+d//16])
+                # Eight adjacent BF16 metadata values form one native 128-bit
+                # asynchronous copy. The head-contiguous page layout supplies
+                # these vectors without scalar gather/store instructions.
+                metadata_atom = cute.make_copy_atom(
+                    cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL),
+                    cutlass.BFloat16, num_bits_per_copy=128)
+                metadata_predicate = cute.make_rmem_tensor((8,), cutlass.Boolean)
+                metadata_predicate.fill(old)
+                for field in cutlass.range_constexpr(2):
+                    src_ptr = meta.iterator + sparse_meta_page*meta.stride[0] + field*meta.stride[1] + self.head*meta.stride[3]+d%16
+                    src = cute.make_tensor(cute.make_ptr(cutlass.BFloat16, src_ptr.toint(),
+                        cute.AddressSpace.gmem, assumed_align=16), cute.make_layout((8,)))
+                    dst_ptr = metadata_tile.iterator + pg*256+field*128+d
+                    dst = cute.make_tensor(cute.make_ptr(cutlass.BFloat16, dst_ptr.toint(),
+                        cute.AddressSpace.smem, assumed_align=16), cute.make_layout((8,)))
+                    cute.copy(metadata_atom, src, dst, pred=metadata_predicate)
+                cute.arch.cp_async_commit_group()
             else:
                 d = self.thread
                 for pg in cutlass.range_constexpr(8 if self.sparse else 1):
@@ -156,17 +172,21 @@ class HierarchicalKVManager(ParamsBase):
                     metadata_tile[pg, 1, d] = staged_minimum
         else:
             t = self.thread
-            index = n_block*self.tile_n + t
-            logical = index//16
-            valid = (n_block >= 0) & (index < self.seqlen) & (slot >= 0)
             if const_expr(self.sparse):
-                if valid:
-                    logical = selected[req, logical]
-            pos = logical*16+index%16
+                base = logical_tile[t//16]
+                pos = base+t%16
+                valid = (base >= 0) & (pos < length)
+                physical = Int64(logical_tile[8+t//16])
+            else:
+                index = n_block*self.tile_n+t
+                pos = index
+                valid = (n_block >= 0) & (index < self.seqlen) & (slot >= 0)
+                physical = Int64(0)
+                if valid & (pos >= 0) & (pos < prefix) & (pos < length):
+                    physical = Int64(table[req, pos//16])
             old = valid & (pos >= 0) & (pos < prefix) & (pos < length)
             staged_scale, staged_minimum = cutlass.BFloat16(0.), cutlass.BFloat16(0.)
             if old:
-                physical = Int64(table[req, pos//16])
                 staged_scale = meta[physical, 2, pos%16, self.head]
                 staged_minimum = meta[physical, 3, pos%16, self.head]
             metadata_tile[0, 0, t] = staged_scale
@@ -190,16 +210,12 @@ class HierarchicalKVManager(ParamsBase):
         for row in cutlass.range(cute.size(dest, mode=[1]), unroll=1):
             t = coords[0, row, 0][0]
             if const_expr(self.sparse):
-                pos = logical_tile[t]
-                valid = pos >= 0
+                base = logical_tile[t//16]
+                pos = base+t%16
+                valid = (base >= 0) & (pos < length)
             else:
-                index = n_block * self.tile_n + t
-                logical = index // 16
-                valid = (n_block >= 0) & (index < self.seqlen) & (slot >= 0)
-                if const_expr(self.sparse):
-                    if valid:
-                        logical = selected[req, logical]
-                pos = logical * 16 + index % 16
+                pos = n_block*self.tile_n+t
+                valid = (n_block >= 0) & (pos < self.seqlen) & (slot >= 0)
                 valid = valid & (pos >= 0) & (pos < length)
             old = valid & (pos < prefix)
             for k in cutlass.range_constexpr(cute.size(dest, mode=[2])):
