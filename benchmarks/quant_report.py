@@ -117,20 +117,23 @@ def report(run, *, notes=None):
         text = notes.read_text()
         # Completed reports integrate both formats and are edited as a whole.
         # Only replace the original progress section while it still exists.
-        if "### MXFP4 Highlight" in text and "### Findings" in text:
+        if notes.suffix == ".md" and "### MXFP4 Highlight" in text and "### Findings" in text:
             start, end = text.index("### MXFP4 Highlight"), text.index("### Findings")
             assert start < end
             notes.write_text(text[:start] + "\n".join(lines) + "\n" + text[end:])
         else:
             print("Preserved integrated report; refreshed MXFP4 evidence only.")
-        atomic_json(notes.parent.parent / "outputs/evidence/mxfp4.json", result)
+    evidence_root = notes.parent.parent if notes is not None else run.resolve().parents[2]
+    evidence = evidence_root / "outputs/evidence/mxfp4.json"
+    evidence.parent.mkdir(parents=True, exist_ok=True)
+    atomic_json(evidence, result)
     return result
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", type=Path, required=True)
-    parser.add_argument("--notes", type=Path, default=Path("notes/experiments.md"))
+    parser.add_argument("--notes", type=Path, help="Optional integrated report; HTML prose is preserved")
     args = parser.parse_args()
     report(args.run, notes=args.notes)
 

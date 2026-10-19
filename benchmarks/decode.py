@@ -3,9 +3,9 @@
 The batch measurement of branch thesis's benchmarks/longspec/grid.py: one
 fresh engine per run on one GPU, synchronous scheduling, completed prefills
 held until the whole batch has prefilled, and a window from the last first
-token to the first finished request; EOS is ignored. Prompts are the token
-files grid.py builds (longbench2-<ctx>-<slot>.json), so both branches decode
-identical inputs.
+token to the first finished request. --eos-aware stops naturally and records
+raw outputs and decode-step counts; the legacy default forces continuation.
+Inputs are frozen prompt manifests or grid.py token files.
 
   .venv/bin/python -m benchmarks.decode --checkpoint <spot ckpt> \
       --mode highlight --prompts <dir> --batch 1 --samples 2 --out <dir>
@@ -38,6 +38,12 @@ def add_engine_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--checkpoint", required=True, help="Spot (Highlight) checkpoint")
     p.add_argument("--mode", choices=("dense", "direct", "highlight"), required=True,
                    help="dense target, direct sparse generation, or sparse-drafted speculation")
+    from highlight_spec.hierarchical_config import METHODS
+    p.add_argument("--hierarchical-method", choices=tuple(METHODS), help="opt into the shared packed 4+4-bit cache")
+    p.add_argument("--hierarchical-attention-backend", choices=("triton", "fa4"), default="triton",
+                   help="packed attention implementation; fa4 requires the validated SM100 runtime")
+    p.add_argument("--native-fp8-highlight", action="store_true",
+                   help="direct Highlight with native FA4 E4M3 backbone KV and BF16 indexer")
     p.add_argument("--spec-tokens", type=int, default=6)
     p.add_argument("--topk-fraction", type=float, default=0.07)
     p.add_argument("--topp", type=float, help="draft by top-p block mass instead of top-K")
@@ -56,18 +62,27 @@ def add_engine_args(p: argparse.ArgumentParser) -> None:
                    help="Highlight side-cache format; model weights and backbone KV stay BF16")
     p.add_argument("--gpu-mem-util", type=float, default=0.9)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--draft-ffn-checkpoint", help="pinned W4A16 FFN weights; target weights/KV stay BF16")
+    p.add_argument("--draft-attention", choices=("full", "highlight"),
+                   help="opt into the paired FFN draft benchmark")
 
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     add_engine_args(p)
-    p.add_argument("--prompts", required=True, help="directory of grid.py prompt files")
+    inputs = p.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--prompts", help="directory of grid.py prompt files")
+    inputs.add_argument("--prompt-manifest", help="frozen Multi-LexSum prompts.json")
+    p.add_argument("--eos-aware", action="store_true", help="stop at EOS; audit raw outputs and useful speculative emissions")
     p.add_argument("--ctx", type=int, default=32640)
     p.add_argument("--gen", type=int, default=128)
     p.add_argument("--batch", type=int, default=1)
     p.add_argument("--samples", type=int, default=1,
                    help="prompt pool N > 1: N batches of --batch consecutive prompts, wrapping around")
+    p.add_argument("--single-batch", action="store_true",
+                   help="measure only the first full batch from the frozen prompt pool")
     p.add_argument("--reference", help="tokens file of a dense run on the same prompts")
+    p.add_argument("--capacity-only", action="store_true", help="initialize the engine and record KV capacity without generating")
     p.add_argument("--out", required=True)
     args = p.parse_args(argv)
     if args.gen < 2:
@@ -144,11 +159,13 @@ class BatchScheduler(Scheduler):
 class BatchWindow:
     """Count emitted tokens from the prefill barrier through the first finish."""
 
-    def __init__(self, request_ids):
+    def __init__(self, request_ids, trace=False):
         self.request_ids = set(request_ids)
+        self.order = list(request_ids)
         self.counts, self.first = {}, {}
         self.start = self.end = None
         self.tokens = 0
+        self.steps = [] if trace else None
 
     def update(self, outputs):
         if not outputs or self.end is not None:
@@ -156,10 +173,13 @@ class BatchWindow:
         if self.start is not None and {o.request_id for o in outputs} != self.request_ids:
             raise RuntimeError("decode step did not contain the whole batch")
         stamps = []
+        previous = dict(self.counts)
         for o in outputs:
             if o.request_id not in self.request_ids or o.metrics is None or o.metrics.first_token_ts <= 0:
                 raise RuntimeError("missing request or engine timestamps")
             count = len(o.outputs[0].token_ids)
+            if self.start is None and o.finished:
+                raise RuntimeError("request finished before the prefill barrier; no full-batch decode window")
             if self.start is None and (count != 1 or o.finished):
                 raise RuntimeError("generation advanced before the prefill barrier")
             if count < self.counts.get(o.request_id, 0):
@@ -173,6 +193,13 @@ class BatchWindow:
             return
         if len(set(stamps)) != 1 or stamps[0] <= self.start:
             raise RuntimeError("batch outputs do not share a valid engine timestamp")
+        if self.steps is not None:
+            by_id = {o.request_id: o for o in outputs}
+            self.steps.append(dict(
+                before=[previous[key] for key in self.order],
+                after=[self.counts[key] for key in self.order],
+                finished=[by_id[key].finished for key in self.order],
+                elapsed_seconds=stamps[0] - self.start))
         if any(o.finished for o in outputs):
             self.end = stamps[0]
             self.tokens = sum(self.counts.values()) - len(self.request_ids)
@@ -181,16 +208,28 @@ class BatchWindow:
         if self.end is None:
             raise RuntimeError("no complete full-batch decode window")
         seconds = self.end - self.start
-        return {
+        result = {
             "decode_seconds": seconds,
             "decode_tok_s": self.tokens / seconds,
             "decode_tokens": self.tokens,
             "decode_window": "all_prefills_complete_to_first_request_finish",
         }
+        if self.steps is not None:
+            result["decode_steps"] = self.steps
+        return result
 
 
 def load_prompts(args) -> list[list[int]]:
     count = args.samples if args.samples > 1 else args.batch
+    if getattr(args, "prompt_manifest", None):
+        rows = json.loads(Path(args.prompt_manifest).read_text())
+        if len(rows) != count or len({r["id"] for r in rows}) != count:
+            raise ValueError("manifest must contain exactly the requested distinct prompt pool")
+        for row in rows:
+            ids = row["prompt_token_ids"]
+            if len(ids) != args.ctx or digest(ids) != row["prompt_sha256"]:
+                raise ValueError("manifest prompt length or hash changed")
+        return [r["prompt_token_ids"] for r in rows]
     prompts = []
     for slot in range(count):
         paths = sorted(Path(args.prompts).rglob(f"longbench2-{args.ctx}-{slot}.json"))
@@ -205,6 +244,10 @@ def load_prompts(args) -> list[list[int]]:
 
 def prompt_groups(args, prompts):
     """Branch thesis's rule: every prompt appears equally often at every batch size."""
+    if getattr(args, "single_batch", False):
+        if len(prompts) < args.batch:
+            raise ValueError("the prompt pool cannot fill the measured batch")
+        return [(prompts[:args.batch], list(range(args.batch)))]
     if args.samples == 1:
         return [(prompts, list(range(len(prompts))))]
     n = len(prompts)
@@ -247,7 +290,7 @@ def rope_parameters(checkpoint: str, factor: float) -> dict:
     }
 
 
-def sampling_params(max_tokens: int, *, ignore_eos: bool):
+def sampling_params(max_tokens: int, *, ignore_eos: bool, eos_token_ids=None):
     """Greedy, every knob explicit: generation_config="vllm" inherits nothing from the checkpoint."""
     from vllm import SamplingParams
 
@@ -262,8 +305,19 @@ def sampling_params(max_tokens: int, *, ignore_eos: bool):
         max_tokens=max_tokens,
         min_tokens=0,
         ignore_eos=ignore_eos,
+        stop_token_ids=eos_token_ids,
         skip_special_tokens=False,
     )
+
+
+def configured_eos_ids(checkpoint):
+    ids = set()
+    for name in ("config.json", "generation_config.json"):
+        value = json.loads((Path(checkpoint) / name).read_text())["eos_token_id"]
+        ids.update(value if isinstance(value, list) else [value])
+    if not ids or any(type(value) is not int for value in ids):
+        raise ValueError("checkpoint has no valid EOS token IDs")
+    return sorted(ids)
 
 
 def selection_overrides(args) -> dict:
@@ -293,6 +347,14 @@ def selection_overrides(args) -> dict:
 
 def build_engine(args, scheduler_cls: str | None = "benchmarks.decode.BatchScheduler"):
     """max_model_len is args.ctx + args.gen; above the native window RoPE becomes static YaRN."""
+    native_fp8 = getattr(args, "native_fp8_highlight", False)
+    if native_fp8 and (args.mode != "direct" or getattr(args, "hierarchical_method", None)
+            or args.flash_attn_version != 4 or args.indexer_cache_format != "bf16"
+            or getattr(args, "draft_attention", None) or getattr(args, "draft_ffn_checkpoint", None)):
+        raise ValueError("native FP8 is a separate direct Highlight option with FA4 and a BF16 indexer")
+    if getattr(args, "hierarchical_method", None):
+        from highlight_spec.hierarchical_config import build_engine as hierarchical_engine
+        return hierarchical_engine(args, scheduler_cls)
     from vllm import LLM
     from spotattention.serve import stats
 
@@ -302,6 +364,17 @@ def build_engine(args, scheduler_cls: str | None = "benchmarks.decode.BatchSched
     factor = yarn_factor(args.ctx + args.gen)
     if args.mode == "highlight":
         hf_overrides = {**selection_overrides(args), "molle_spec_decode": True}
+        draft_attention = getattr(args, "draft_attention", None)
+        draft_checkpoint = getattr(args, "draft_ffn_checkpoint", None)
+        if draft_checkpoint and draft_attention is None:
+            raise ValueError("--draft-ffn-checkpoint requires --draft-attention")
+        if draft_attention is not None:
+            if args.verify_fraction != 0 or args.indexer_cache_format != "bf16":
+                raise ValueError("FFN comparison requires dense BF16 verification and BF16 indexer keys")
+            hf_overrides.update(molle_ffn_draft_attention=draft_attention,
+                                molle_ffn_draft_checkpoint=draft_checkpoint)
+            if draft_attention == "full":
+                hf_overrides["use_dsa"] = False
         speculative_config = {
             "method": "custom_class",
             "model": SPECULATOR,
@@ -318,11 +391,14 @@ def build_engine(args, scheduler_cls: str | None = "benchmarks.decode.BatchSched
     if factor is not None:
         hf_overrides["rope_parameters"] = rope_parameters(args.checkpoint, factor)
     extra = {} if scheduler_cls is None else {"scheduler_cls": scheduler_cls}
+    if native_fp8:
+        hf_overrides["architectures"] = ["NativeFP8Qwen3ForCausalLM"]
+        extra["calculate_kv_scales"] = True
     return LLM(
         model=args.checkpoint,
         generation_config="vllm",
         dtype="bfloat16",
-        kv_cache_dtype="auto",
+        kv_cache_dtype="fp8_e4m3" if native_fp8 else "auto",
         block_size=16,
         max_num_seqs=args.batch,
         max_model_len=args.ctx + args.gen,
@@ -335,9 +411,12 @@ def build_engine(args, scheduler_cls: str | None = "benchmarks.decode.BatchSched
         disable_log_stats=False,
         hf_overrides=hf_overrides,
         speculative_config=speculative_config,
-        compilation_config={"cudagraph_capture_sizes": sorted(sizes)},
+        compilation_config={"cudagraph_capture_sizes": sorted(sizes),
+                            **({"cudagraph_mode": "FULL_DECODE_ONLY"} if native_fp8 else {})},
         attention_config={"backend": "FLASH_ATTN", "flash_attn_version": args.flash_attn_version},
-        worker_extension_cls=stats.WORKER_EXTENSION,
+        worker_extension_cls=("highlight_spec.native_fp8.NativeFP8StatsWorker" if native_fp8 else
+                              "highlight_spec.ffn_draft.FFNStatsWorker"
+                              if getattr(args, "draft_attention", None) else stats.WORKER_EXTENSION),
         **extra,
     )
 
@@ -368,7 +447,7 @@ def selection_snapshot(llm) -> dict:
     return llm.collective_rpc(stats.RPC_METHOD, kwargs={"reset": False})[0]
 
 
-def generate_batch(llm, args, prompts, max_tokens):
+def generate_batch(llm, args, prompts, max_tokens, validate_draft=None):
     from vllm.inputs import TokensPrompt
     from vllm.sampling_params import RequestOutputKind
 
@@ -378,23 +457,31 @@ def generate_batch(llm, args, prompts, max_tokens):
     available = engine.cache_config.num_gpu_blocks - 1  # the null block
     if required > available:
         raise ValueError(f"batch does not fit: needs {required} KV blocks, has {available}; reduce --batch")
-    params = sampling_params(max_tokens, ignore_eos=True)
+    eos_aware = getattr(args, "eos_aware", False)
+    eos_ids = configured_eos_ids(args.checkpoint) if eos_aware else None
+    params = sampling_params(max_tokens, ignore_eos=not eos_aware, eos_token_ids=eos_ids)
     params.output_kind = RequestOutputKind.CUMULATIVE
     ids = [str(next(llm.request_counter)) for _ in prompts]
-    window = BatchWindow(ids)
+    window = BatchWindow(ids, trace=eos_aware)
     # Selection counters need an engine RPC, which must not fall inside the
     # timed window: snapshot after every prefill step, keep the last one.
     track = args.mode != "dense"
     selection = selection_snapshot(llm) if track else None
     before = after = None
-    finished = {}
+    finished, latest = {}, {}
     try:
         for request_id, prompt in zip(ids, prompts):
             llm.llm_engine.add_request(request_id, TokensPrompt(prompt_token_ids=prompt), params)
         while llm.llm_engine.has_unfinished_requests():
             outputs = llm.llm_engine.step()
+            latest.update({o.request_id: o for o in outputs})
             started, ended = window.start is not None, window.end is not None
             window.update(outputs)
+            # Warm-up only: validate while every request is still active. After
+            # draining, the draft buffers may describe only the final request.
+            if validate_draft is not None and started and window.end is None:
+                validate_draft()
+                validate_draft = None
             if not started and window.start is not None:
                 before = {"spec": spec_counters(llm, args.spec_tokens), "selection": selection}
             elif window.start is None and track:
@@ -407,13 +494,24 @@ def generate_batch(llm, args, prompts, max_tokens):
             for o in outputs:
                 if o.finished:
                     finished[o.request_id] = o
-    except Exception:
+        outputs = [finished[key] for key in ids]
+        if eos_aware:
+            from benchmarks.multilexsum import output_audit
+            for o in outputs:
+                output_audit(list(o.outputs[0].token_ids), eos_ids, max_tokens, o.outputs[0].finish_reason)
+        elif any(len(o.outputs[0].token_ids) != max_tokens for o in outputs):
+            raise RuntimeError("a batch request ended before the requested output length")
+        timing = window.report()
+    except Exception as error:
+        if eos_aware:
+            Path(args.out, "failed-batch.json").write_text(json.dumps(dict(
+                error=str(error), request_ids=ids,
+                outputs={key: dict(token_ids=list(o.outputs[0].token_ids),
+                                   finish_reason=o.outputs[0].finish_reason)
+                         for key, o in latest.items()}), indent=2) + "\n")
         llm.llm_engine.abort_request(ids)
         raise
-    outputs = [finished[key] for key in ids]
-    if any(len(o.outputs[0].token_ids) != max_tokens for o in outputs):
-        raise RuntimeError("a batch request ended before the requested output length")
-    return outputs, window.report(), before, after
+    return outputs, timing, before, after
 
 
 def spec_record(before: dict, after: dict) -> dict:
@@ -430,6 +528,8 @@ def spec_record(before: dict, after: dict) -> dict:
 def selection_record(before: dict, after: dict) -> dict | None:
     from spotattention.serve import stats
 
+    if before is None and after is None:
+        return None
     diff = {**after, **{f: [a - b for a, b in zip(after[f], before[f])] for f in stats.FIELDS}}
     summary = stats.summarize(diff)
     if summary is None:
@@ -446,7 +546,9 @@ def compare_tokens(reference: list[list[int]], candidate: list[list[int]]) -> li
     rows = []
     for a, b in zip(reference, candidate, strict=True):
         first = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), None)
-        rows.append({"first_mismatch": first, "mismatches": sum(x != y for x, y in zip(a, b))})
+        if first is None and len(a) != len(b):
+            first = min(len(a), len(b))
+        rows.append({"first_mismatch": first, "mismatches": sum(x != y for x, y in zip(a, b)) + abs(len(a) - len(b))})
     return rows
 
 
@@ -485,7 +587,31 @@ def main(argv=None) -> None:
     groups = prompt_groups(args, prompts)
     llm = build_engine(args)
     engine = llm.llm_engine.vllm_config
-    generate_batch(llm, args, groups[0][0], min(args.gen, 16))  # warm-up
+    lookahead = args.spec_tokens if args.mode == "highlight" else 0
+    per_request = blocks_needed([args.ctx], args.gen, lookahead, engine.cache_config.block_size)
+    available = engine.cache_config.num_gpu_blocks - 1
+    capacity = dict(batch=args.batch, block_size=engine.cache_config.block_size,
+        available_blocks=available, blocks_per_request=per_request,
+        required_blocks=per_request * args.batch,
+        maximum_batch=available // per_request,
+        reserved_fraction=per_request * args.batch / available,
+        fits=per_request * args.batch <= available)
+    (out / "capacity.json").write_text(json.dumps(capacity, indent=2) + "\n")
+    if args.capacity_only:
+        print(json.dumps(capacity), flush=True)
+        return
+    if not capacity["fits"]:
+        raise ValueError(f"batch exceeds full-output KV reserve: {capacity}")
+    ffn_info = None
+    def validate_draft():
+        nonlocal ffn_info
+        ffn_info = llm.collective_rpc("ffn_draft_info", kwargs={"validate": True, "num_reqs": args.batch})[0]
+        (out / "ffn-validation.json").write_text(json.dumps(ffn_info, indent=2) + "\n")
+    generate_batch(llm, args, groups[0][0], min(args.gen, 16),
+                   validate_draft if getattr(args, "draft_attention", None) else None)
+    if getattr(args, "draft_attention", None):
+        if ffn_info is None:
+            raise RuntimeError("warm-up ended before full-batch draft validation")
     reference = None
     if args.reference:
         reference = json.loads(Path(args.reference).read_text())
@@ -505,6 +631,10 @@ def main(argv=None) -> None:
             "spec_tokens": args.spec_tokens if args.mode == "highlight" else 0,
             "selection": selection_overrides(args) if args.mode != "dense" else None,
             "indexer_cache_format": getattr(engine.model_config.hf_config, "molle_kcache_format", "bf16"),
+            "kv_cache_dtype": engine.cache_config.cache_dtype,
+            "calculate_kv_scales": engine.cache_config.calculate_kv_scales,
+            "backbone_cache": ("hierarchical_4plus4" if args.hierarchical_method else
+                               "native_fp8_e4m3" if args.native_fp8_highlight else "bf16"),
             "measurement": "batch",
             "flash_attn_version": engine.attention_config.flash_attn_version,
             "gpu_memory_utilization": args.gpu_mem_util,
@@ -512,8 +642,11 @@ def main(argv=None) -> None:
             "max_model_len": args.ctx + args.gen,
             "yarn_factor": yarn_factor(args.ctx + args.gen),
             "thinking": False,
+            "draft_attention": getattr(args, "draft_attention", None),
+            "draft_ffn_checkpoint": getattr(args, "draft_ffn_checkpoint", None),
+            "draft_graph": "step" if args.mode == "highlight" else None,
             "temperature": 0.0,
-            "ignore_eos": True,
+            "ignore_eos": not args.eos_aware,
             "seed": args.seed,
             **timing,
             "versions": {n: importlib.metadata.version(n) for n in ("torch", "vllm")},
@@ -523,12 +656,29 @@ def main(argv=None) -> None:
             "node": socket.gethostname(),
             "gpu": torch.cuda.get_device_name(),
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "ffn_draft_validation": ffn_info,
+            "kv_capacity": capacity,
         }
         if args.mode == "highlight":
-            record.update(spec_record(before["spec"], after["spec"]))
+            native = spec_record(before["spec"], after["spec"])
+            if args.eos_aware:
+                from benchmarks.eos_throughput import useful_speculation
+                record["native_spec_counters"] = native
+                record["speculation"] = useful_speculation(timing["decode_steps"], args.spec_tokens, args.gen)
+            else:
+                record.update(native)
             record["draft_kv"] = selection_record(before["selection"], after["selection"])
         elif args.mode == "direct":
             record["decode_kv"] = selection_record(before["selection"], after["selection"])
+        if args.eos_aware:
+            from benchmarks.multilexsum import output_audit
+            eos_ids = configured_eos_ids(args.checkpoint)
+            record["eos_token_ids"] = eos_ids
+            record["request_outputs"] = [dict(
+                prompt_slot=s, output_token_ids=ids, text=o.outputs[0].text,
+                finish_reason=o.outputs[0].finish_reason, stop_reason=o.outputs[0].stop_reason,
+                **output_audit(ids, eos_ids, args.gen, o.outputs[0].finish_reason))
+                for s, ids, o in zip(slots, group_tokens, outputs, strict=True)]
         if reference is not None:
             ref = [reference["tokens"][reference["prompt_slots"].index(s)] for s in slots]
             record["match"] = compare_tokens(ref, group_tokens)
@@ -547,6 +697,10 @@ def main(argv=None) -> None:
     }))
     summary = {"mode": args.mode, "ctx": args.ctx, "gen": args.gen, "batch": args.batch,
                "selection": records[0]["selection"], **summarize_run(records)}
+    if ffn_info is not None:
+        summary["ffn_draft_info"] = llm.collective_rpc("ffn_draft_info")[0]
+        if summary["ffn_draft_info"]["step_graph_replays"] <= ffn_info["step_graph_replays"]:
+            raise AssertionError("no draft CUDA graph replayed in the timed run")
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary), flush=True)
 

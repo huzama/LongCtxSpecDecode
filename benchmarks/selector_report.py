@@ -213,15 +213,10 @@ def report(run):
     if state["state"] == "complete":
         assert len(rows) == 48 and len(processes) == 48 * repetitions
         assert len({j["pid"] for j in state["jobs"]}) == len(state["jobs"]), "process IDs were reused"
-        notes = root / "notes/experiments.md"
-        content = notes.read_text()
-        if hashlib.sha256(content.encode()).hexdigest() == plan["notes_sha256"]:
-            updated = update_notes(content, rows)
-            notes.write_text(updated)
-            result["notes_updated"] = True
-        else:
-            result["notes_updated"] = False
-            print("Preserved edited notes; complete repetition evidence is ready.", flush=True)
+        # The primary report is now HTML. Keep this campaign's evidence export
+        # independent of editorial integration; never inject Markdown into HTML.
+        result["notes_updated"] = False
+        print("Refreshed selector repetition evidence; preserved the HTML report.", flush=True)
     atomic_json(run / "summary.json", result)
     atomic_json(root / "outputs/evidence/selector-repeatability.json", result)
     return result

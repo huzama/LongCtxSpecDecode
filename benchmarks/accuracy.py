@@ -73,7 +73,7 @@ def load_documents(manifest: dict, rows: list[dict], tokenizer) -> dict[str, str
     ):
         raise ValueError("the checkpoint tokenizer differs from the frozen one")
     path = hf_hub_download(protocol["dataset"], "data.json", repo_type="dataset", revision=protocol["dataset_revision"],
-                           cache_dir=decode.ROOT / "outputs/hf/hub")
+                           cache_dir=os.environ.get("HF_HUB_CACHE", decode.ROOT / "outputs/hf/hub"))
     items = {item["_id"]: item for item in json.loads(Path(path).read_text())}
     documents = {}
     for q in rows:
@@ -145,13 +145,20 @@ def main(argv=None) -> None:
     os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, [str(decode.ROOT), os.environ.get("PYTHONPATH")]))
     llm = decode.build_engine(args, scheduler_cls=None)
     engine = llm.llm_engine.vllm_config
-    params = decode.sampling_params(args.gen, ignore_eos=False)
-    answer_params = decode.sampling_params(COT_ANSWER_TOKENS, ignore_eos=False)
+    eos_ids = decode.configured_eos_ids(args.checkpoint) if args.hierarchical_method or args.native_fp8_highlight else None
+    params = decode.sampling_params(args.gen, ignore_eos=False, eos_token_ids=eos_ids)
+    answer_params = decode.sampling_params(COT_ANSWER_TOKENS, ignore_eos=False, eos_token_ids=eos_ids)
 
     def generate(ids, sampling):
         [result] = llm.generate([TokensPrompt(prompt_token_ids=ids)], sampling, use_tqdm=False)
         if list(result.prompt_token_ids) != ids:
             raise RuntimeError("engine changed the input tokens")
+        if args.hierarchical_method or args.native_fp8_highlight:
+            from benchmarks.multilexsum import output_audit
+            output_audit(list(result.outputs[0].token_ids), eos_ids, sampling.max_tokens,
+                         result.outputs[0].finish_reason)
+            if args.hierarchical_method:
+                llm.collective_rpc("hierarchical_cache_info")
         return result.outputs[0]
     highlight = args.mode == "highlight"
     # The keys thesis's compare requires equal between the dense and candidate runs.
@@ -163,6 +170,9 @@ def main(argv=None) -> None:
         "ctx": args.ctx,
         "gen": args.gen,
         "thinking": False,
+        "batch": args.batch,
+        "async_scheduling": engine.scheduler_config.async_scheduling,
+        "prefix_caching": engine.cache_config.enable_prefix_caching,
         "temperature": params.temperature,
         "sampling": {k: getattr(params, k) for k in (
             "temperature", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty",
@@ -179,6 +189,11 @@ def main(argv=None) -> None:
         "yarn_original_window": decode.NATIVE_WINDOW,
         "rope_parameters": getattr(engine.model_config.hf_config, "rope_parameters", None),
         "mode": args.mode,
+        "hierarchical_method": args.hierarchical_method,
+        "backbone_cache": ("hierarchical_4plus4" if args.hierarchical_method else
+                           "native_fp8_e4m3" if args.native_fp8_highlight else "bf16"),
+        "calculate_kv_scales": engine.cache_config.calculate_kv_scales,
+        "eos_audit_ids": eos_ids,
         "spec_tokens": args.spec_tokens if highlight else 0,
         "selection": decode.selection_overrides(args) if args.mode != "dense" else None,
         "cot": {
@@ -212,6 +227,7 @@ def main(argv=None) -> None:
                 row.update(
                     reasoning_prompt_tokens=len(prompt),
                     reasoning_text=reasoning.text,
+                    reasoning_token_ids=list(reasoning.token_ids),
                     reasoning_tokens=len(reasoning.token_ids),
                     reasoning_finish_reason=reasoning.finish_reason,
                 )
@@ -250,6 +266,9 @@ def main(argv=None) -> None:
     if highlight:
         finished["spec"] = {**totals, "alpha": totals["accepted"] / totals["draft_tokens"] if totals["draft_tokens"] else None}
     write_json(out / "finished.json", finished)
+    if args.hierarchical_method or args.native_fp8_highlight:
+        rpc = "hierarchical_cache_info" if args.hierarchical_method else "native_fp8_info"
+        write_json(out / "cache.json", llm.collective_rpc(rpc)[0])
     print(json.dumps(finished), flush=True)
 
 

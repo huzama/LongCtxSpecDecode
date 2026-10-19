@@ -25,6 +25,13 @@ def register() -> None:
     _admit_v2_runner()
     _register_speculator()
     _reserve_draft_slots()
+    from vllm.model_executor.models import ModelRegistry
+    if "NativeFP8Qwen3ForCausalLM" not in ModelRegistry.get_supported_archs():
+        ModelRegistry.register_model("NativeFP8Qwen3ForCausalLM",
+            "highlight_spec.native_fp8:NativeFP8Qwen3ForCausalLM")
+    if "HierarchicalQwen3ForCausalLM" not in ModelRegistry.get_supported_archs():
+        ModelRegistry.register_model("HierarchicalQwen3ForCausalLM",
+            "highlight_spec.hierarchical_backend:HierarchicalQwen3ForCausalLM")
 
 
 def _admit_v2_runner() -> None:

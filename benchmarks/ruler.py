@@ -117,7 +117,8 @@ def run(argv=None) -> None:
     os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, [str(decode.ROOT), os.environ.get("PYTHONPATH")]))
     llm = decode.build_engine(args, scheduler_cls=None)
     engine = llm.llm_engine.vllm_config
-    params = decode.sampling_params(args.gen, ignore_eos=False)
+    eos_ids = decode.configured_eos_ids(args.checkpoint) if args.hierarchical_method or args.native_fp8_highlight else None
+    params = decode.sampling_params(args.gen, ignore_eos=False, eos_token_ids=eos_ids)
     highlight = args.mode == "highlight"
     config = {
         "rows_sha256": decode.digest(manifest),
@@ -126,6 +127,10 @@ def run(argv=None) -> None:
         "ctx": args.ctx,
         "gen": args.gen,
         "thinking": False,
+        "batch": args.batch,
+        "async_scheduling": engine.scheduler_config.async_scheduling,
+        "prefix_caching": engine.cache_config.enable_prefix_caching,
+        "calculate_kv_scales": engine.cache_config.calculate_kv_scales,
         "sampling": {k: getattr(params, k) for k in (
             "temperature", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty",
             "repetition_penalty", "min_tokens", "skip_special_tokens")},
@@ -138,6 +143,10 @@ def run(argv=None) -> None:
         "yarn_factor": decode.yarn_factor(args.ctx + args.gen),
         "rope_parameters": getattr(engine.model_config.hf_config, "rope_parameters", None),
         "mode": args.mode,
+        "hierarchical_method": args.hierarchical_method,
+        "backbone_cache": ("hierarchical_4plus4" if args.hierarchical_method else
+                           "native_fp8_e4m3" if args.native_fp8_highlight else "bf16"),
+        "eos_audit_ids": eos_ids,
         "spec_tokens": args.spec_tokens if highlight else 0,
         "selection": decode.selection_overrides(args) if args.mode != "dense" else None,
         "provenance": {
@@ -158,6 +167,11 @@ def run(argv=None) -> None:
             if list(result.prompt_token_ids) != r["prompt_token_ids"]:
                 raise RuntimeError("engine changed frozen input tokens")
             answer = result.outputs[0]
+            if args.hierarchical_method or args.native_fp8_highlight:
+                from benchmarks.multilexsum import output_audit
+                output_audit(list(answer.token_ids), eos_ids, args.gen, answer.finish_reason)
+                if args.hierarchical_method:
+                    llm.collective_rpc("hierarchical_cache_info")
             extracted, had_tag = extract_answer(answer.text, r)
             row = {k: r[k] for k in ("id", "task", "length_bin", "actual_length", "outputs")}
             row.update(
@@ -165,6 +179,7 @@ def run(argv=None) -> None:
                 extracted=extracted,
                 had_tag=had_tag,
                 output_text=answer.text,
+                output_token_ids=list(answer.token_ids),
                 output_tokens=len(answer.token_ids),
                 finish_reason=answer.finish_reason,
             )
@@ -191,6 +206,9 @@ def run(argv=None) -> None:
     if selection_before is not None:
         finished["decode_kv"] = decode.selection_record(selection_before, decode.selection_snapshot(llm))
     write_json(out / "finished.json", finished)
+    if args.hierarchical_method or args.native_fp8_highlight:
+        rpc = "hierarchical_cache_info" if args.hierarchical_method else "native_fp8_info"
+        write_json(out / "cache.json", llm.collective_rpc(rpc)[0])
     print(json.dumps(finished), flush=True)
 
 

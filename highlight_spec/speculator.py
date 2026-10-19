@@ -3,20 +3,28 @@
 Every draft step runs the target at query length 1, so Spot's indexer replaces
 each layer's KV with its selected blocks. Verification runs at query length
 k + 1, which Spot attends densely. Drafts write their KV into the target cache
-at their own slots and verification rewrites those slots, so the output is the
-target's greedy decoding. Spot's molle_verify_fraction makes verification
-select too; the output is then the sparse verifier's greedy decoding.
+at their own slots and verification rewrites those slots before greedy
+accept/reject. Spot's molle_verify_fraction makes verification select too,
+changing the target computation. Greedy verification does not establish
+bitwise equivalence to an independent serial run with different kernel shapes.
 
 Spot's molle_draft_select sets when drafts score: "step" scores every draft
 step; "round" scores a round's first step and selects the later steps from
 those scores, which skips the side-cache read. Each phase has its own graphs.
+
+The optional FFN benchmark shares attention and KV with the target while
+replacing only draft FFNs. It also supports full-attention drafts. The standard
+one-graph-per-step execution is retained; verification remains separate.
 """
 
 from __future__ import annotations
 
 from typing import Any
+from types import SimpleNamespace
 
 import torch
+import triton as tr
+import triton.language as tl
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
@@ -25,9 +33,6 @@ from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
     SpeculatorCudaGraphManager,
-)
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
-    prepare_decode_inputs,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
@@ -40,11 +45,26 @@ class HighlightSpeculator(DraftModelSpeculator):
         self.current_draft_step = torch.zeros((), dtype=torch.int64, device=device)
         # One graph manager per scoring phase: [scored] or [scored, reused].
         self.graphs: list[SpeculatorCudaGraphManager] = []
+        self.step_graph_replays = 0
 
     def load_draft_model(self, target_model, target_attn_layer_names):
+        self.hierarchical_context = getattr(target_model.model, "hierarchical_context", None)
+        hf = self.vllm_config.model_config.hf_config
+        attention = getattr(hf, "molle_ffn_draft_attention", None)
         self.selection = getattr(target_model.model, "sel", None)
         if self.selection is None:
-            raise ValueError("Highlight drafting needs a SpotAttention model with use_dsa")
+            if attention != "full" and self.hierarchical_context is None:
+                raise ValueError("Highlight drafting needs a SpotAttention model with use_dsa")
+            self.selection = SimpleNamespace(layer_scores=None, reuse_scores=False)
+        weight_checkpoint = getattr(hf, "molle_draft_weight_checkpoint", None)
+        if weight_checkpoint is not None:
+            if attention is not None or self.hierarchical_context is None:
+                raise ValueError("decoder weight pilot requires hierarchical KV without FFN-only overrides")
+            from highlight_spec.weight_draft import WeightDraftModel
+            return WeightDraftModel(target_model, weight_checkpoint)
+        if attention is not None:
+            from highlight_spec.ffn_draft import FFNDraftModel
+            return FFNDraftModel(target_model, getattr(hf, "molle_ffn_draft_checkpoint", None))
         return target_model
 
     def set_attn(
@@ -76,6 +96,9 @@ class HighlightSpeculator(DraftModelSpeculator):
         ]
 
     def capture(self) -> None:
+        hierarchical = getattr(self, "hierarchical_context", None)
+        if hierarchical is not None:
+            hierarchical.drafting = True
         try:
             for phase, graphs in enumerate(self.graphs):
                 self.selection.reuse_scores = phase > 0
@@ -90,6 +113,8 @@ class HighlightSpeculator(DraftModelSpeculator):
                 )
         finally:
             self.selection.reuse_scores = False
+            if hierarchical is not None:
+                hierarchical.drafting = False
 
     @torch.inference_mode()
     def propose(
@@ -128,6 +153,7 @@ class HighlightSpeculator(DraftModelSpeculator):
             self.max_model_len,
             self.max_num_reqs,
         )
+        self.current_draft_step.zero_()
         # The graph managers exist from KV-cache init; the profile run precedes it.
         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.graphs[0] if self.graphs else None,
@@ -144,16 +170,33 @@ class HighlightSpeculator(DraftModelSpeculator):
         skip_attn = dummy_run and skip_attn_for_dummy_run
         attn_metadata = slot_mappings_by_layer = None
         round_select = self.selection.layer_scores is not None
+        hierarchical = getattr(self, "hierarchical_context", None)
+        # One CPU record per proposal ties its graph count to the target call.
+        # Aggregate counts also include prefill and post-window work and cannot
+        # prove that each timed round used all six draft graphs.
+        audit_start = None
+        if hierarchical is not None and hierarchical.benchmark_active:
+            audit_start = (len(hierarchical.target_execution)-1, self.step_graph_replays)
+        if hierarchical is not None:
+            hierarchical.draft_slots.fill_(-1)
+            hierarchical.draft_slots[:num_reqs].copy_(input_batch.idx_mapping)
+            hierarchical.draft_committed[:num_reqs].copy_(input_batch.seq_lens[:num_reqs]-num_rejected)
+            hierarchical.drafting = True
         try:
             for step in range(self.num_speculative_steps):
                 self.selection.reuse_scores = round_select and step > 0
-                if not skip_attn:
-                    slot_mappings = self.block_tables.compute_slot_mappings(
-                        idx_mapping, query_start_loc, positions, batch_desc.num_tokens
-                    )
-                    slot_mappings_by_layer = build_slot_mappings_by_layer(
-                        slot_mappings, self.kv_cache_config
-                    )
+                # Packed metadata uses persistent device buffers. Its positions
+                # and native slot mapping are refreshed inside each draft graph.
+                # Other backends retain their native per-step metadata builder.
+                packed_graph = hierarchical is not None and batch_desc.cg_mode == CUDAGraphMode.FULL
+                if not skip_attn and not packed_graph:
+                    if hierarchical is None:
+                        slot_mappings = self.block_tables.compute_slot_mappings(
+                            idx_mapping, query_start_loc, positions, batch_desc.num_tokens
+                        )
+                        slot_mappings_by_layer = build_slot_mappings_by_layer(
+                            slot_mappings, self.kv_cache_config
+                        )
                     attn_metadata = self._build_draft_attn_metadata(
                         num_reqs=num_reqs,
                         num_reqs_padded=batch_desc.num_reqs or num_reqs,
@@ -161,9 +204,9 @@ class HighlightSpeculator(DraftModelSpeculator):
                         seq_lens_cpu_upper_bound=upper,
                         step=step + 1,
                     )
-                self.current_draft_step.fill_(step)
                 if batch_desc.cg_mode == CUDAGraphMode.FULL:
                     self.graphs[int(self.selection.reuse_scores)].run_fullgraph(batch_desc)
+                    self.step_graph_replays += 1
                 else:
                     self._step(
                         num_reqs,
@@ -175,6 +218,14 @@ class HighlightSpeculator(DraftModelSpeculator):
                     )
         finally:
             self.selection.reuse_scores = False
+            if hierarchical is not None:
+                hierarchical.drafting = False
+        if audit_start is not None:
+            target_event, graph_start = audit_start
+            hierarchical.draft_execution.append(dict(
+                target_event_index=target_event, requests=num_reqs,
+                tokens=batch_desc.num_tokens, steps=self.num_speculative_steps,
+                graph_replays=self.step_graph_replays-graph_start))
         return self.draft_tokens[:num_reqs]
 
     def _step(
@@ -186,6 +237,20 @@ class HighlightSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
+        if self.hierarchical_context is not None and attn_metadata is not None:
+            mappings = self.block_tables.compute_slot_mappings(
+                self.idx_mapping[:num_reqs], self.input_buffers.query_start_loc[:num_reqs+1],
+                self.input_buffers.positions[:num_reqs], num_tokens)
+            slot_mappings = build_slot_mappings_by_layer(mappings, self.kv_cache_config)
+            # The indexer builder shares this flag buffer with the target.
+            # A proposal immediately after prefill must clear it in the graph,
+            # even when no draft metadata builder runs on the host.
+            from spotattention.serve.kcache import IndexerKCacheMetadata
+            seen = set()
+            for metadata in attn_metadata.values():
+                if isinstance(metadata, IndexerKCacheMetadata) and id(metadata) not in seen:
+                    metadata.is_prefilling.zero_()
+                    seen.add(id(metadata))
         with set_forward_context(
             attn_metadata,
             self.vllm_config,
@@ -218,6 +283,25 @@ class HighlightSpeculator(DraftModelSpeculator):
         )
 
 
+@tr.jit
+def _prepare_first_step(SEQ, IDX, SAMPLED, REJECTED, LAST, NEXT, INPUT, POS, QSL, LENGTHS,
+                        LAST_STRIDE: tl.constexpr, NEXT_STRIDE: tl.constexpr,
+                        N: tl.constexpr, MAX_N: tl.constexpr, MAX_LEN: tl.constexpr,
+                        BLOCK: tl.constexpr):
+    row = tl.arange(0, BLOCK)
+    active = row < N
+    slot = tl.load(IDX+row, active, 0)
+    sampled = tl.load(SAMPLED+row, active, 0)
+    token = tl.where(sampled > 0,
+                    tl.load(LAST+slot*LAST_STRIDE, active, 0),
+                    tl.load(NEXT+slot*NEXT_STRIDE, active, 0))
+    base = tl.load(SEQ+row, active, 0)-tl.load(REJECTED+row, active, 0)
+    tl.store(INPUT+row, token, active)
+    tl.store(POS+row, tl.minimum(base, MAX_LEN-1), active)
+    tl.store(LENGTHS+row, tl.where(active, tl.minimum(base+1, MAX_LEN), 0), row < MAX_N)
+    tl.store(QSL+row, tl.minimum(row, N), row <= MAX_N)
+
+
 def prepare_first_step(
     input_buffers: InputBuffers,
     target_seq_lens: torch.Tensor,
@@ -234,21 +318,30 @@ def prepare_first_step(
     A row mid chunked prefill samples nothing; it drafts from its next prompt
     token, whose KV the next chunk recomputes.
     """
-    slots = idx_mapping.long()
-    token = torch.where(
-        num_sampled > 0, last_sampled[slots, 0].int(), next_prefill_tokens[0, slots]
-    )
     n = target_seq_lens.shape[0]
-    # prepare_decode_inputs advances the position by one.
-    input_buffers.positions[:n] = target_seq_lens - num_rejected - 1
-    prepare_decode_inputs(
-        token.view(n, 1),
-        target_seq_lens,
-        num_rejected,
-        input_buffers,
-        max_model_len,
-        max_num_reqs,
-    )
+    _prepare_first_step[(1,)](target_seq_lens, idx_mapping, num_sampled, num_rejected,
+        last_sampled, next_prefill_tokens, input_buffers.input_ids, input_buffers.positions,
+        input_buffers.query_start_loc, input_buffers.seq_lens,
+        last_sampled.stride(0), next_prefill_tokens.stride(1), n, max_num_reqs,
+        max_model_len, tr.next_power_of_2(max_num_reqs+1))
+
+
+@tr.jit
+def _advance(DRAFTS, STEP, TOKENS, INPUT, POS, LENGTHS, N: tl.constexpr,
+             STRIDE: tl.constexpr, STEPS: tl.constexpr, MAX_LEN: tl.constexpr,
+             BLOCK: tl.constexpr):
+    row = tl.arange(0, BLOCK)
+    mask = row < N
+    step = tl.load(STEP)
+    token = tl.load(TOKENS+row, mask, 0)
+    pos = tl.load(POS+row, mask, 0)
+    length = tl.load(LENGTHS+row, mask, 0)
+    tl.store(DRAFTS+row*STRIDE+step, token, mask)
+    tl.store(INPUT+row, token, mask)
+    tl.store(POS+row, tl.minimum(pos+1, MAX_LEN-1), mask)
+    tl.store(LENGTHS+row, tl.where(length > 0, tl.minimum(length+1, MAX_LEN), 0), mask)
+    # One CTA owns the scalar. Cycling also keeps capture warmups in bounds.
+    tl.store(STEP, (step+1) % STEPS)
 
 
 def advance(
@@ -260,10 +353,6 @@ def advance(
 ) -> None:
     """Record this step's drafts and feed them to the next step (graph-safe)."""
     n = draft_tokens.shape[0]
-    draft_tokens.scatter_(1, step.expand(n, 1), tokens.view(n, 1))
-    input_buffers.input_ids[:n] = tokens
-    positions = input_buffers.positions[:n]
-    positions.copy_((positions + 1).clamp(max=max_model_len - 1))
-    # Padded rows keep seq_len 0, which Spot's selection treats as empty.
-    seq_lens = input_buffers.seq_lens[:n]
-    seq_lens.copy_(torch.where(seq_lens > 0, (seq_lens + 1).clamp(max=max_model_len), 0))
+    _advance[(1,)](draft_tokens, step, tokens, input_buffers.input_ids,
+        input_buffers.positions, input_buffers.seq_lens, n, draft_tokens.stride(0),
+        draft_tokens.shape[1], max_model_len, tr.next_power_of_2(n))

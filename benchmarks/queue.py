@@ -1,4 +1,4 @@
-"""Run a frozen experiment plan on idle, cooperatively locked GPUs 2/3."""
+"""Run a frozen experiment plan on its authorized, idle, cooperatively locked GPUs."""
 import argparse
 import datetime
 import fcntl
@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 import xml.etree.ElementTree as ET
 
@@ -23,14 +24,15 @@ def atomic_json(path, value):
 
 def source_digest(root):
     paths = [*root.glob("benchmarks/*.py"), *root.glob("highlight_spec/*.py"),
-             *root.glob("tests/*.py"), *root.glob("outputs/molle/spotattention/**/*.py")]
+             *root.glob("tests/*.py"), *root.glob("outputs/molle/spotattention/**/*.py"),
+             *root.glob("spotattention/**/*.py")]
     h = hashlib.sha256()
     for path in sorted(paths):
         h.update(str(path.relative_to(root)).encode() + b"\0" + path.read_bytes())
     return h.hexdigest()
 
 
-def idle_gpus():
+def idle_gpus(allowed=(2, 3)):
     raw = subprocess.check_output(["nvidia-smi", "--query-gpu=index,uuid,memory.used,utilization.gpu",
                                    "--format=csv,noheader,nounits"], text=True)
     occupied = set(subprocess.check_output(["nvidia-smi", "--query-compute-apps=gpu_uuid",
@@ -38,20 +40,51 @@ def idle_gpus():
     result = set()
     for line in raw.splitlines():
         index, uuid, memory, utilization = [s.strip() for s in line.split(",")]
-        if int(index) in (2, 3) and uuid not in occupied and int(memory) <= 1000 and int(utilization) == 0:
+        if int(index) in allowed and uuid not in occupied and int(memory) <= 1000 and int(utilization) == 0:
             result.add(int(index))
     return result
 
 
-def eligible(jobs):
+def eligible(jobs, gpu=None):
     complete = {j["name"] for j in jobs if j["state"] == "complete"}
     return next((j for j in jobs if j["state"] == "pending"
+                 and (gpu is None or j.get("required_gpu", gpu) == gpu)
                  and set(j.get("depends_on", [])) <= complete), None)
+
+
+def require_preflight(out, source_hash):
+    preflight = json.loads((out / "preflight.json").read_text())
+    expected = {"8b-dense-bf16", "4b-direct-bf16", "8b-sv50-mxfp4", "8b-int4-highlight-bf16"}
+    checks = preflight.get("checks", [])
+    if (preflight.get("passed") is not True or preflight.get("source_sha256") != source_hash
+            or preflight.get("plan_sha256") != hashlib.sha256((out / "plan.json").read_bytes()).hexdigest()
+            or len(checks) != 4 or {c["name"] for c in checks} != expected
+            or any(c.get("passed") is not True for c in checks)):
+        raise ValueError("GPU preflight has not passed for this frozen source and plan")
 
 
 def validate(job, dest):
     read = lambda name: json.loads((dest / name).read_text())
     kind = job["kind"]
+    if kind == "main-quality":
+        from benchmarks.main_quality import validate as validate_quality
+        return validate_quality(job, dest)
+    if kind == "native-fp8-throughput":
+        from benchmarks.native_fp8_throughput import validate as validate_fp8
+        validate_fp8(job, dest)
+        return
+    if kind.startswith("main-"):
+        from benchmarks.main_results import validate as validate_main
+        return validate_main(job, dest)
+    if kind == "eos-capacity":
+        capacity = read("capacity.json")
+        if capacity["batch"] != job["batch"] or capacity["maximum_batch"] < 1:
+            raise ValueError("invalid capacity probe")
+        return
+    if kind == "eos-throughput":
+        from benchmarks.eos_throughput import audit_job
+        audit_job(job, dest)
+        return
     if kind == "validation":
         cases = list(ET.parse(dest / "validation.xml").iter("testcase"))
         assert len(cases) == job["expected_tests"] and all(not list(c) for c in cases), "skipped/failed GPU checks"
@@ -103,15 +136,40 @@ def main():
     owner = (out / "controller.lock").open("a")
     fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
     plan = json.loads((out / "plan.json").read_text())
+    runtime_root = Path(plan.get("runtime_root", root))
+    allowed = tuple(plan.get("allowed_gpus", (2, 3)))
+    if len(set(allowed)) != len(allowed) or not allowed:
+        raise ValueError("invalid authorized GPU list")
     report_module = plan.get("report_module", "benchmarks.quant_report")
-    assert report_module in {"benchmarks.quant_report", "benchmarks.selector_report"}
-    for filename, digest in plan.get("input_sha256", {}).items():
-        assert hashlib.sha256((root / filename).read_bytes()).hexdigest() == digest, filename
+    assert report_module in {"benchmarks.quant_report", "benchmarks.selector_report", "benchmarks.eos_throughput", "benchmarks.main_results", "benchmarks.native_fp8_throughput", "benchmarks.main_quality"}
+    if report_module == "benchmarks.main_quality":
+        from benchmarks.main_quality import verify_plan as verify_quality
+        verify_quality(out)
+    if report_module == "benchmarks.native_fp8_throughput":
+        from benchmarks.native_fp8_throughput import verify_plan as verify_fp8
+        verify_fp8(out)
+    if report_module == "benchmarks.main_results":
+        from benchmarks.main_results import verify_plan
+        verify_plan(out)
+    if report_module == "benchmarks.eos_throughput":
+        import importlib.metadata
+        import socket
+        if allowed != (2, 3) or socket.gethostname() != plan["host"]:
+            raise ValueError("EOS campaign host/GPU authorization changed")
+        if source_digest(root) != plan["source_sha256"]:
+            raise ValueError("frozen source changed")
+        for name, version in plan["runtime"].items():
+            if importlib.metadata.version(name) != version:
+                raise ValueError(f"runtime changed: {name}")
+        require_preflight(out, plan["source_sha256"])
+    if report_module not in ("benchmarks.main_results", "benchmarks.native_fp8_throughput"):
+        for filename, digest in plan.get("input_sha256", {}).items():
+            assert hashlib.sha256((root / filename).read_bytes()).hexdigest() == digest, filename
     plan_hash = hashlib.sha256((out / "plan.json").read_bytes()).hexdigest()
     state_path = out / "status.json"
     state = json.loads(state_path.read_text()) if state_path.exists() else dict(
         jobs=[dict(j, state="pending") for j in plan["jobs"]], source_sha256=source_digest(root),
-        plan_sha256=plan_hash, allowed_gpus=[2, 3], idle_seconds_required=60)
+        plan_sha256=plan_hash, allowed_gpus=list(allowed), idle_seconds_required=60)
     jobs = state["jobs"]
     assert state["plan_sha256"] == plan_hash and state["source_sha256"] == source_digest(root), "plan/source changed"
     assert not any(j["state"] == "running" for j in jobs), "inspect existing children before restart"
@@ -122,11 +180,12 @@ def main():
         for filename, digest in job.get("input_sha256", {}).items():
             assert hashlib.sha256((root / filename).read_bytes()).hexdigest() == digest, filename
     env = {**os.environ, "VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_USE_FLASHINFER_SAMPLER": "0",
-        "VLLM_RPC_BASE_PATH": "/tmp", "TMPDIR": str(root / "outputs/tmp"),
-        "TORCHINDUCTOR_CACHE_DIR": str(root / "outputs/torchinductor"), "TRITON_CACHE_DIR": str(root / "outputs/triton"),
-        "VLLM_CACHE_ROOT": str(root / "outputs/vllm-cache"), "CUDA_HOME": "/usr/local/cuda",
+        "VLLM_RPC_BASE_PATH": "/tmp", "TMPDIR": str(runtime_root / "outputs/tmp"),
+        "TORCHINDUCTOR_CACHE_DIR": str(runtime_root / "outputs/torchinductor"), "TRITON_CACHE_DIR": str(runtime_root / "outputs/triton"),
+        "VLLM_CACHE_ROOT": str(runtime_root / "outputs/vllm-cache"), "CUDA_HOME": "/usr/local/cuda",
         "PATH": "/usr/local/cuda/bin:" + os.environ["PATH"], "PYTHONPATH": str(root),
-        "OMP_NUM_THREADS": "8", "TOKENIZERS_PARALLELISM": "false", "HF_HUB_OFFLINE": "1", "PYTHONUNBUFFERED": "1"}
+        "OMP_NUM_THREADS": "8", "TOKENIZERS_PARALLELISM": "false", "HF_HUB_OFFLINE": "1", "PYTHONUNBUFFERED": "1",
+        "HF_HOME": str(runtime_root / "outputs/hf"), "HF_HUB_CACHE": str(runtime_root / "outputs/hf/hub")}
     active, idle_since = {}, {}
 
     def save(label):
@@ -135,7 +194,7 @@ def main():
 
     def report():
         with (out / "report.log").open("a") as log:
-            code = subprocess.call([str(root / ".venv/bin/python"), "-m", report_module,
+            code = subprocess.call([str(runtime_root / ".venv/bin/python"), "-m", report_module,
                                     "--run", str(out)], stdout=log, stderr=subprocess.STDOUT,
                                    env={**env, "CUDA_VISIBLE_DEVICES": ""})
         state["report_exit_code"] = code
@@ -169,42 +228,47 @@ def main():
             failure = failure or state.get("report_failed")
         if failure and not active:
             save("failed")
-            return
+            report()
+            return 1
         if all(j["state"] == "complete" for j in jobs):
             save("complete")
             report()
             save("report_failed" if state.get("report_failed") else "complete")
-            return
+            return 1 if state.get("report_failed") else 0
         if not failure:
             try:
-                available = idle_gpus()
-                for gpu in (2, 3):
+                available = idle_gpus(allowed)
+                for gpu in allowed:
                     if gpu not in available or gpu in active:
                         idle_since.pop(gpu, None)
                         continue
                     idle_since.setdefault(gpu, time.monotonic())
-                    job = eligible(jobs)
+                    job = eligible(jobs, gpu)
                     if job is None or time.monotonic() - idle_since[gpu] < 60:
                         continue
                     if source_digest(root) != state["source_sha256"]:
                         state["report_failed"] = True
                         state["error"] = "source changed before job launch"
                         break
-                    lock = (root / f"outputs/gpu-{gpu}-benchmark.lock").open("a")
+                    lock = (runtime_root / f"outputs/gpu-{gpu}-benchmark.lock").open("a")
                     try:
                         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     except BlockingIOError:
                         lock.close()
                         continue
-                    if gpu not in idle_gpus():
+                    if gpu not in idle_gpus(allowed):
                         lock.close()
                         idle_since.pop(gpu, None)
                         continue
                     dest = out / job["name"]
+                    command = job["command"]
+                    if job["kind"] == "eos-throughput":
+                        from benchmarks.eos_throughput import resolve_batch
+                        job["batch"], command = resolve_batch(job, out)
                     dest.mkdir(parents=True, exist_ok=False)
-                    atomic_json(dest / "command.json", dict(argv=job["command"], CUDA_VISIBLE_DEVICES=str(gpu)))
+                    atomic_json(dest / "command.json", dict(argv=command, CUDA_VISIBLE_DEVICES=str(gpu)))
                     log = (dest / "engine.log").open("w")
-                    proc = subprocess.Popen(job["command"], env={**env, "CUDA_VISIBLE_DEVICES": str(gpu)},
+                    proc = subprocess.Popen(command, env={**env, "CUDA_VISIBLE_DEVICES": str(gpu)},
                         stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, pass_fds=(lock.fileno(),))
                     job.update(state="running", gpu=gpu, pid=proc.pid, started=now())
                     active[gpu] = (proc, job, lock, log)
@@ -216,4 +280,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

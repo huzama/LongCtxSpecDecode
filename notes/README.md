@@ -1,13 +1,11 @@
-# Highlight-drafted speculative decoding
+# Research report
 
-The active implementation is the `highlight-spec` worktree: a vLLM plugin over
-MoLLE's Highlight (SpotAttention). The `thesis` branch holds the Vegas baseline.
+Branch `thesis` maintains the [HTML report](https://github.com/huzama/LongCtxSpecDecode/blob/thesis/notes/experiments.html)
+and its [editing and publication instructions](https://github.com/huzama/LongCtxSpecDecode/blob/thesis/notes/README.md).
+In the shared research checkout, [open the local report](../../../../notes/experiments.html)
+in a browser.
+This serving worktree holds the implementation, campaign audits and raw results.
+Its local `notes/experiments.md` is only a pointer to the primary report.
 
-| File | Purpose |
-|---|---|
-| [experiments.md](experiments.md) | Method, measurement protocol, results and limitations |
-| [literature.yaml](literature.yaml) | Literature survey and historical research ideas |
-
-B200 run artifacts and audits stay under `outputs/`. The five-method audit
-validates completed cells before updating the experiment tables; blank cells
-are unmeasured. The development archive is linked from `experiments.md`.
+The five tabs are Setup & Method, Main Results, All Results, Weight Quantization
+and Parallel Drafting. Protocols and results each have one authoritative location.
