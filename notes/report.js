@@ -29,7 +29,7 @@
   };
   const evidence = {
     setup: "validation",
-    main: "hierarchical-throughput",
+    main: "main-campaign-details",
     all: "validation",
     weights: "ffn-validation-and-evidence",
     parallel: "jacobi-evidence",
@@ -129,6 +129,12 @@
     );
   }
   function filter(panel = current(), all = false) {
+    panel.querySelectorAll("[data-context-column]").forEach((cell) => {
+      cell.hidden =
+        !all &&
+        state.context !== "all" &&
+        cell.dataset.contextColumn !== state.context;
+    });
     panel
       .querySelectorAll("tr[data-model],tr[data-format],tr[data-context]")
       .forEach((r) => (r.hidden = mismatches(r.dataset, all)));
@@ -171,10 +177,8 @@
         )
         .map((c) => c.selectedOptions[0].textContent);
       feedback.textContent = selection.length
-        ? "Showing " +
-          selection.join(" · ") +
-          ". Protocol and evidence text stays visible."
-        : "All configurations shown. Filters apply to labeled result tables.";
+        ? "Showing " + selection.join(" · ") + "."
+        : "All configurations shown.";
     }
   }
   function displayUnit(value) {
