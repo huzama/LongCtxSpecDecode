@@ -175,9 +175,9 @@
               <li>
                 <strong>Draft six tokens</strong
                 ><span
-                  >Score context on the first draft step. Reuse scores and
-                  update selection over six autoregressive steps, each with a 7%
-                  prompt-length budget.</span
+                  >Score context on the first draft step. Reuse learned scores,
+                  refresh recency priority and rebuild the block table over six
+                  autoregressive steps, each with a 7% prompt-length budget.</span
                 >
               </li>
               <li>
@@ -197,16 +197,21 @@
               </li>
             </ol>
             <p>
-              Selection uses 16-token blocks. Blocks covering the last 64 tokens
-              receive priority inside the budget. Direct Highlight refreshes
-              scores every token; sparse verification computes fresh scores. The
-              Highlight indexer is additional state, distinct from the shared
-              backbone KV.
+              Selection uses 16-token blocks. Budgets are fractions of the
+              original prompt length, rounded down to whole blocks. Blocks
+              covering the last 64 tokens receive priority inside the budget;
+              priorities persist until fresh scoring. Direct Highlight refreshes
+              scores every token. Sparse verification scores with the anchor
+              query and shares one block table across all seven positions per
+              layer and request, with causal masking. Its recency window ends
+              at the final proposal. The Highlight indexer is additional state,
+              distinct from the shared backbone KV.
             </p>
             <p class="scope-note">
-              Sparse verification changes the target computation. Hierarchical
-              verification approximates BF16 KV. Neither configuration carries
-              an established lossless-output claim;
+              Shared-selection sparse verification is not guaranteed to match
+              per-token Highlight decoding. Hierarchical verification
+              approximates BF16 KV. Neither configuration carries an
+              established lossless-output claim;
               <a href="#hierarchical-numerics">numerical evidence</a> and task
               quality are reported separately.
             </p>
@@ -259,23 +264,33 @@
               </li>
             </ol>
             <p>
+              Compression advances through committed KV in 128-token groups.
               Keys use 128-token groups; values use 128-channel groups.
-              Verification handles a compression boundary per query position
-              while retaining all six proposals. Packed values are reconstructed
-              into BF16 tiles for attention; the full context is never expanded
-              into a second KV cache.
+              At a boundary, verification retains the group's BF16 copy for
+              earlier queries and uses its compressed representation for later
+              queries, matching the sequential cache precision schedule.
+              All six proposals remain in the round. Packed values are
+              reconstructed into BF16 tiles for attention.
             </p>
             <p>
               At eight KV heads, a 16-token page occupies 33,792 bytes including
               quantization metadata, or 51.56% of a BF16 page. Each request and
-              layer also has a 263-position BF16 ring. This page ratio excludes
-              the ring, indexer and scratch; measured peak memory includes the
-              allocated cache pool.
+              layer also has a 263-position BF16 ring: two 128-token groups plus
+              seven provisional positions. It holds recent committed KV,
+              provisional KV and BF16 values retained across a compression
+              boundary. Sparse attention reads only selected ring positions
+              inside its block budget. This page ratio excludes the ring,
+              indexer and scratch; measured peak memory includes the allocated
+              cache pool.
             </p>
             <p class="scope-note">
               The hierarchical representation follows
               <a href="https://arxiv.org/html/2502.10424v1#S4">QuantSpec</a>.
-              “4+4” denotes coarse plus refinement storage, not native FP8.
+              “4+4” denotes an unsigned coarse code and a signed residual,
+              reconstructed as <code>m + s·c + (s/16)·r</code>. Coarse-only reads
+              omit the residual codes but still load the shared scales and
+              minima for accessed groups. These are not the upper and lower
+              nibbles of conventional INT8, or native FP8.
               Cache precision, model-weight precision and indexer precision are
               independent choices.
             </p>
@@ -645,6 +660,15 @@
               <span data-throughput-unit>× dense</span>; use the unit control to
               view absolute rates. Every ratio uses the same model, context and
               batch.
+            </p>
+            <p class="scope-note" id="attention-split-review">
+              <strong>Attention split check pending.</strong> At 8B/64K,
+              batch 19 uses one attention split and the dense reference averages
+              234.49 ms per step. At 8B/128K, batch 9 uses two splits and averages
+              120.44 ms. All three process runs reproduce the difference.
+              The split change is confirmed; its timing effect has not been
+              isolated. Retain these measurements, but treat cross-context
+              speedup ranges as provisional pending the controlled comparison.
             </p>
             <div class="model-block" data-model-block="4b">
               <div

@@ -21,7 +21,9 @@ All Results. Shared protocols use links that open the appropriate tab. `report.c
 presentation and `report.js` provides tab navigation, persistent model/context
 filters, indexer filtering, throughput units, mobile contents and printing.
 Print/PDF supports the current tab or the whole report, with all configurations
-and expanded evidence. Keep the HTML, CSS and JS together when sharing.
+and expanded evidence. Keep the HTML, CSS, JS and `evidence.json` together when
+sharing. The evidence snapshot preserves source hashes and audited summaries;
+the standalone thesis copy embeds the CSS and JS.
 
 The serving worktree's `benchmarks.report_html` publishes audited throughput
 inside the `report:status` and `report:throughput` regions of All Results and
@@ -36,3 +38,8 @@ and all `selector-repeatability:*` markers. Publishers preserve surrounding pros
 Raw evidence stays under `outputs/`. Original Markdown is frozen under
 [`archive/`](archive/experiments.md); the [literature survey](literature.yaml)
 remains separate. Historical measurements retain their original protocols.
+
+Before new runs, read the serving worktree's
+[next-run checkpoint](../outputs/worktrees/highlight-spec/notes/README.md#next-run-checkpoint).
+The 8B attention split comparison is pending; preserve recorded measurements
+and their implementation scope until that check resolves the timing discontinuity.
