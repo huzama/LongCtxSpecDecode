@@ -52,6 +52,49 @@ def eligible(jobs, gpu=None):
                  and set(j.get("depends_on", [])) <= complete), None)
 
 
+def validate_jobs(jobs, planned_jobs, allowed):
+    """Reject altered or unlaunchable schedules before inspecting any GPU."""
+    if (not allowed or len(set(allowed)) != len(allowed)
+            or any(type(g) is not int or g not in range(4) for g in allowed)):
+        raise ValueError("invalid authorized GPU list")
+    names = [j["name"] for j in jobs]
+    planned = {j["name"]: j for j in planned_jobs}
+    if (len(set(names)) != len(names) or len(planned) != len(planned_jobs)
+            or set(names) != set(planned)):
+        raise ValueError("queue jobs differ from the frozen plan")
+    dependencies = {}
+    for job in jobs:
+        name = job["name"]
+        if (not isinstance(name, str) or not name
+                or any(p in ("", ".", "..") for p in name.split("/"))):
+            raise ValueError("job name must be a relative path without aliases")
+        if job.get("state") == "running":
+            raise ValueError("inspect existing children before restart; running jobs are never retried")
+        if job.get("state") not in ("pending", "complete", "failed"):
+            raise ValueError("unknown job state: " + name)
+        for key, value in planned[name].items():
+            # The EOS runner records its resolved common batch in status.json.
+            if key == "batch" and job["kind"] == "eos-throughput":
+                continue
+            if job.get(key) != value:
+                raise ValueError("job differs from the frozen plan: " + name + "/" + key)
+        if "required_gpu" in job and (type(job["required_gpu"]) is not int
+                                      or job["required_gpu"] not in allowed):
+            raise ValueError("job requires an unauthorized GPU: " + name)
+        deps = set(job.get("depends_on", []))
+        if not deps <= set(planned):
+            raise ValueError("unknown job dependency: " + name)
+        dependencies[name] = deps
+    resolved = set()
+    while dependencies:
+        ready = {name for name, deps in dependencies.items() if deps <= resolved}
+        if not ready:
+            raise ValueError("cyclic job dependencies")
+        resolved.update(ready)
+        for name in ready:
+            del dependencies[name]
+
+
 def require_preflight(out, source_hash):
     preflight = json.loads((out / "preflight.json").read_text())
     expected = {"8b-dense-bf16", "4b-direct-bf16", "8b-sv50-mxfp4", "8b-int4-highlight-bf16"}
@@ -141,7 +184,8 @@ def main():
     if len(set(allowed)) != len(allowed) or not allowed:
         raise ValueError("invalid authorized GPU list")
     report_module = plan.get("report_module", "benchmarks.quant_report")
-    assert report_module in {"benchmarks.quant_report", "benchmarks.selector_report", "benchmarks.eos_throughput", "benchmarks.main_results", "benchmarks.native_fp8_throughput", "benchmarks.main_quality"}
+    if report_module not in {"benchmarks.quant_report", "benchmarks.selector_report", "benchmarks.eos_throughput", "benchmarks.main_results", "benchmarks.native_fp8_throughput", "benchmarks.main_quality"}:
+        raise ValueError("unknown report module")
     if report_module == "benchmarks.main_quality":
         from benchmarks.main_quality import verify_plan as verify_quality
         verify_quality(out)
@@ -164,21 +208,21 @@ def main():
         require_preflight(out, plan["source_sha256"])
     if report_module not in ("benchmarks.main_results", "benchmarks.native_fp8_throughput"):
         for filename, digest in plan.get("input_sha256", {}).items():
-            assert hashlib.sha256((root / filename).read_bytes()).hexdigest() == digest, filename
+            if hashlib.sha256((root / filename).read_bytes()).hexdigest() != digest:
+                raise ValueError("input changed: " + filename)
     plan_hash = hashlib.sha256((out / "plan.json").read_bytes()).hexdigest()
     state_path = out / "status.json"
     state = json.loads(state_path.read_text()) if state_path.exists() else dict(
         jobs=[dict(j, state="pending") for j in plan["jobs"]], source_sha256=source_digest(root),
         plan_sha256=plan_hash, allowed_gpus=list(allowed), idle_seconds_required=60)
     jobs = state["jobs"]
-    assert state["plan_sha256"] == plan_hash and state["source_sha256"] == source_digest(root), "plan/source changed"
-    assert not any(j["state"] == "running" for j in jobs), "inspect existing children before restart"
-    assert len({j["name"] for j in jobs}) == len(jobs)
+    if state["plan_sha256"] != plan_hash or state["source_sha256"] != source_digest(root):
+        raise ValueError("plan/source changed")
+    validate_jobs(jobs, plan["jobs"], allowed)
     for job in jobs:
-        assert not Path(job["name"]).is_absolute() and ".." not in Path(job["name"]).parts
-        assert all(p in {j["name"] for j in jobs} for p in job.get("depends_on", []))
         for filename, digest in job.get("input_sha256", {}).items():
-            assert hashlib.sha256((root / filename).read_bytes()).hexdigest() == digest, filename
+            if hashlib.sha256((root / filename).read_bytes()).hexdigest() != digest:
+                raise ValueError("input changed: " + filename)
     env = {**os.environ, "VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_USE_FLASHINFER_SAMPLER": "0",
         "VLLM_RPC_BASE_PATH": "/tmp", "TMPDIR": str(runtime_root / "outputs/tmp"),
         "TORCHINDUCTOR_CACHE_DIR": str(runtime_root / "outputs/torchinductor"), "TRITON_CACHE_DIR": str(runtime_root / "outputs/triton"),
@@ -212,7 +256,8 @@ def main():
             if code == 0:
                 try:
                     validate(job, out / job["name"])
-                    assert source_digest(root) == state["source_sha256"], "source changed during run"
+                    if source_digest(root) != state["source_sha256"]:
+                        raise ValueError("source changed during run")
                 except Exception as error:
                     job.update(state="failed", validation_error=str(error))
             lock.close()
