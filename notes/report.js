@@ -21,19 +21,15 @@
   const tabs = [...document.querySelectorAll('[role="tab"]')];
   const controls = $("#shared-controls");
   const labels = {
-    setup: "Setup & Method",
+    setup: "Method & Setup",
     main: "Main Results",
-    all: "All Results",
+    all: "Supporting Results",
     weights: "Weight Quantization",
     parallel: "Parallel Drafting",
   };
-  const evidence = {
-    setup: "validation",
-    main: "main-campaign-details",
-    all: "validation",
-    weights: "ffn-validation-and-evidence",
-    parallel: "jacobi-evidence",
-  };
+  const evidence = Object.fromEntries(
+    panels.map((p) => [p.dataset.study, "validation"]),
+  );
   let active = "main";
   const current = () => panels.find((p) => p.dataset.study === active);
   const hash = () => {
@@ -371,7 +367,6 @@
   document
     .querySelectorAll("article > section")
     .forEach((s) => observer.observe(s));
-  $("#refresh-report").addEventListener("click", () => location.reload());
   $("#print-report").addEventListener("click", () => window.print());
   window.addEventListener("beforeprint", () => {
     if (printState) return;

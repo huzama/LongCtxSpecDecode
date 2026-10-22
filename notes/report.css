@@ -374,9 +374,6 @@ small {
   gap: 12px;
   margin-bottom: 14px;
 }
-.section-number {
-  display: none;
-}
 .section-intro {
   max-width: 1050px;
 }
@@ -662,6 +659,12 @@ details details {
 .compact-list li {
   margin-bottom: 6px;
 }
+.method-flow p {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
 .cache-diagram {
   margin: 18px 0;
   display: grid;
@@ -730,32 +733,6 @@ details details {
 .caution {
   background: #faf7f0;
   border-color: #c6af81;
-}
-.campaign-status {
-  font-size: 12px;
-  color: var(--muted);
-}
-.status-heading {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.status-progress {
-  margin: 8px 0;
-}
-.status-detail,
-.progress-label {
-  font-size: 11px;
-}
-.status-dot {
-  width: 6px;
-  height: 6px;
-  background: var(--warm);
-  border-radius: 50%;
-}
-progress {
-  accent-color: var(--accent);
-  max-width: 100%;
 }
 .anchor-alias {
   display: block;
@@ -878,7 +855,6 @@ h3:hover .permalink,
     font-size: 10px;
   }
   .breadcrumb span,
-  #refresh-report,
   #print-scope {
     display: none;
   }

@@ -33,10 +33,10 @@ This repository is the Vegas vLLM fork (github.com/platformxlab/vegas, remote `u
 - The A6000 runs use sm86 and FlashAttention 2.
 - Use `--qos=normal` for requested tests. Slurm uses QoS preemption: `normal` can preempt and requeue `preemptible` jobs. A GPU occupied by a preemptible job is not necessarily unavailable; inspect job QoS and submit through the regular queue. Let Slurm handle preemption.
 - On `srv01`-`srv09`, GPU work always runs as a Slurm job or job step. Slurm assigns the GPU; never set `CUDA_VISIBLE_DEVICES`. SSH is for CPU-side checks only.
-- `ssh b200-2` is an independent B200 host with no `/shared` mount or Slurm. The user permits direct runs on physical GPUs 2 and 3 only. Use `/NHNHOME/WORKSPACE/26msit001_A/huzama/LongContextSpecDecode` for the checkout and its `.venv`; keep run artifacts and model cache under `outputs/`. Restrict each process to its assigned GPU with `CUDA_VISIBLE_DEVICES`. Keep B200 results separate from A6000 results.
+- `ssh b200-2` is an independent B200 host with no `/shared` mount or Slurm. The user permits direct runs on all four physical GPUs (0–3), only when idle. The serving checkout is `/NHNHOME/WORKSPACE/26msit001_A/huzama/HighlightSpec`; keep run artifacts and model cache under `outputs/`. Restrict each process to its assigned GPU with `CUDA_VISIBLE_DEVICES`. Keep B200 results separate from A6000 results.
 - On `ssh b200-1`, the user authorizes all four physical GPUs (0–3). The serving checkout is `/NHNHOME/WORKSPACE/26msit001_A/huzama/HighlightSpec`. Preserve the frozen experiment scope and paired GPU assignments; require 60 seconds idle and a cooperative lock before dispatch.
 - Keep runtimes separate: the legacy Vegas checkout uses Torch 2.9.1 and the CUDA 12.8 toolkit under `outputs/cuda`; the serving checkout uses Python 3.13, vLLM 0.27.1, Torch 2.13 and system CUDA. Follow the serving branch's `CLAUDE.md` for its environment. `/tmp` is `noexec`: set `TMPDIR`, `TORCHINDUCTOR_CACHE_DIR`, `TRITON_CACHE_DIR`, and `VLLM_CACHE_ROOT` under `outputs/`. Keep `VLLM_RPC_BASE_PATH=/tmp` for short Unix-socket paths.
-- The current method shares BF16 target/draft weights and a hierarchical 4+4-bit backbone KV cache, with four-bit draft reads and 7% Highlight selection. Native FP8 is a separate direct-Highlight control. Earlier BF16/MXFP4 indexer and weight-quantization studies remain in All Results and Weight Quantization.
+- The current method shares BF16 target/draft weights and a hierarchical 4+4-bit backbone KV cache, with four-bit draft reads and 7% Highlight selection. Main comparisons use dense AR, full-context four-bit drafts, and Highlight drafts with full or sparse verification; direct Highlight generation is excluded. Earlier BF16/MXFP4 indexer and weight-quantization studies remain in Supporting Results and Weight Quantization.
 - Paper protocol: thinking off, greedy decoding; dense or 50%/40%/25% selected-score verification. Qwen3 native window is 32,768 input+output tokens, not the config's 40,960; cap total at 131,072. Historical results retain their original protocols. FA4 support lives in tracked adapters; never depend on edits under ignored `vllm/vllm_flash_attn/`.
 
 ```bash
@@ -70,16 +70,24 @@ All repository text is functional, minimalistic, and precise. Short sentences. N
 ### Report publication
 
 The report is one HTML file, `notes/experiments.html`, with five tabs:
-Setup & Method, Main Results, All Results, Weight Quantization and Parallel Drafting.
-Main Results contains hierarchical-cache performance and task-quality tables,
-with N/A for unmeasured cells; BF16-cache comparisons stay in All Results. All Results retains canonical tables, hierarchical KV,
-indexer quantization and historical evidence. Original
-Markdown is frozen under `notes/archive/`. Edit prose directly in HTML;
-presentation and controls live in `notes/report.css` and `notes/report.js`.
-Keep each result and protocol in one place and link to it.
+Method & Setup, Main Results, Supporting Results, Weight Quantization and
+Parallel Drafting. Keep primary tables and short explanations visible; collapse
+cache mechanics, detailed protocols and secondary diagnostics. Keep it a timeless
+scientific report: no queue status, GPU
+assignments, launch counts, rerun plans or implementation chronology. Operational
+records belong under `outputs/`. Retain reproducibility settings, scientific
+limitations and negative findings. Use one collapsed provenance appendix.
 
-The serving worktree’s `benchmarks.report_html` publishes audited throughput
-inside `report:status` and `report:throughput` in All Results, and `report:ffn`
-in Weight Quantization. `benchmarks/study_report.py` publishes saved Jacobi
-audits into `data-study-row` rows in Parallel Drafting. Preserve these markers,
-selector-repeatability markers and row identifiers; do not estimate measurements.
+Main Results contains hierarchical-cache performance and task quality from the
+matching implementation. Supporting Results holds BF16-backbone and indexer
+comparisons. Use N/A for unavailable valid measurements and — for inapplicable
+metrics. Preserve frozen sources and raw evidence; archived or post-EOS timings
+must not enter the main performance tables. Original Markdown is frozen under
+`notes/archive/`. Edit prose in HTML; presentation and controls live in
+`notes/report.css` and `notes/report.js`. Keep each protocol and result in one
+place and link to it.
+
+Preserve `report:throughput`, `report:ffn`, selector-repeatability markers and
+result-row identifiers. The legacy `report:status` region stays empty. Publishers
+must update audited cells and provenance without reinserting operational status
+or replacing editorial prose. Never estimate a measurement.

@@ -1,45 +1,42 @@
 # Experimental report
 
-[Open the report](experiments.html): one HTML document with five tabs.
-It works locally in a browser, without a server or build step.
+[Open the report](experiments.html). One local HTML document, five tabs, no server or build step.
 
-| Tab                                                | Contents                                                                                                        |
-| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| [Setup & Method](experiments.html#setup-study)     | Shared model, cache updates, baselines, settings and measurement protocol                                       |
-| [Main Results](experiments.html#main-study)        | Hierarchical KV performance and task quality; unmeasured cells marked N/A                                       |
-| [All Results](experiments.html#all-study)          | Full throughput, task quality, hierarchical KV, indexer precision, selector comparisons and historical evidence |
-| [Weight Quantization](experiments.html#ffn-study)  | INT4 FFN results, full-projection diagnostic and supporting evidence                                            |
-| [Parallel Drafting](experiments.html#jacobi-study) | Jacobi, carried predictions, prompt retrieval and separate hardware comparisons                                 |
+| Tab                                                | Contents                                                                                              |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| [Method & Setup](experiments.html#setup-study)     | Method, shared cache, compared configurations, workloads, timing protocol and one provenance appendix |
+| [Main Results](experiments.html#main-study)        | Hierarchical-cache throughput, acceptance, memory and task quality from the matching implementation   |
+| [Supporting Results](experiments.html#all-study)   | BF16-backbone results, indexer precision, selector timing and attention diagnostics                   |
+| [Weight Quantization](experiments.html#ffn-study)  | INT4 FFN throughput, full-projection diagnostic and bounded pre-EOS agreement evidence                |
+| [Parallel Drafting](experiments.html#jacobi-study) | Jacobi, carry-over and prompt copying, with separate B200 and A6000 baselines                         |
 
-Edit prose directly in `experiments.html`. All Results retains the earlier studies
-and implementation evidence. Main Results contains the current hierarchical-cache
-method and its controls. Publish only audited results from the matching backend;
-keep superseded timings in raw evidence. Cells with `data-result-source` refresh
-from their linked tables on page load; keep static values current as well.
-Use N/A for unmeasured Main Results cells and preserve original placeholders in
-All Results. Shared protocols use links that open the appropriate tab. `report.css` controls
-presentation and `report.js` provides tab navigation, persistent model/context
-filters, indexer filtering, throughput units, mobile contents and printing.
-Print/PDF supports the current tab or the whole report, with all configurations
-and expanded evidence. Keep the HTML, CSS, JS and `evidence.json` together when
-sharing. The evidence snapshot preserves source hashes and audited summaries;
-the standalone thesis copy embeds the CSS and JS.
+Keep each tab compact: a short explanation and primary tables stay visible;
+cache mechanics, detailed protocols and secondary diagnostics use disclosures.
+Keep the report scientific and timeless. Do not add queue state, GPU assignments,
+launch counts, progress notices, rerun plans, development chronology or test counts.
+Operational records belong under `outputs/`. Retain method details that affect
+interpretation and the exact settings needed to reproduce a comparison.
 
-The serving worktree's `benchmarks.report_html` publishes audited throughput
-inside the `report:status` and `report:throughput` regions of All Results and
-`report:ffn` in Weight Quantization. The stopped campaign snapshot is collapsed under historical
-results; it is not a live job monitor. New timing cells require three audited
-process repetitions.
+Publish only audited measurements from the stated implementation and protocol.
+Main throughput cells require three independent process repetitions. Use N/A for
+unavailable valid measurements and — for inapplicable metrics. Preserve raw
+outputs and frozen sources; keep superseded timings and post-EOS diagnostics in
+the evidence archive, outside the report's performance tables. Never mix them
+with the main comparison. Missing cells do not support performance claims.
 
-`benchmarks/study_report.py` publishes saved Jacobi audits into `data-study-row`
-rows in the same file. Preserve these row identifiers, all `report:*` markers
-and all `selector-repeatability:*` markers. Publishers preserve surrounding prose.
+Edit prose in `experiments.html`; presentation and reader controls live in
+`report.css` and `report.js`. Preserve table row identifiers, `report:*` and
+`selector-repeatability:*` markers. The empty `report:status` region is a legacy
+compatibility anchor and must remain empty. Result publishers must update cells
+and provenance without inserting operational status or replacing surrounding prose.
 
-Raw evidence stays under `outputs/`. Original Markdown is frozen under
-[`archive/`](archive/experiments.md); the [literature survey](literature.yaml)
-remains separate. Historical measurements retain their original protocols.
+Model/context filters, the Supporting Results indexer filter and the throughput
+unit switch apply to labeled tables. Dense references stay in tokens/s. Print/PDF
+supports one tab or all five, with filters cleared and details expanded. Keep the
+HTML, CSS, JS and `evidence.json` together when sharing.
 
-Before new runs, read the serving worktree's
-[next-run checkpoint](../outputs/worktrees/highlight-spec/notes/README.md#next-run-checkpoint).
-The 8B attention split comparison is pending; preserve recorded measurements
-and their implementation scope until that check resolves the timing discontinuity.
+[Evidence snapshot](evidence.json) retains source hashes and audited records,
+including archived studies. Original Markdown is frozen under
+[`archive/`](archive/experiments.md). The [literature survey](literature.yaml) is
+separate. The serving branch's [experiment checkpoint](https://github.com/huzama/LongCtxSpecDecode/blob/highlight-spec/notes/README.md#next-run-checkpoint)
+contains operational instructions; they do not belong in the report.
