@@ -8,26 +8,35 @@ This serving worktree holds the implementation, campaign audits and raw results.
 The [literature survey](https://github.com/huzama/LongCtxSpecDecode/blob/thesis/notes/literature.yaml)
 also lives on `thesis`; no report or survey copy is maintained here.
 
-The five tabs are Setup & Method, Main Results, All Results, Weight Quantization
+The five tabs are Method & Setup, Main Results, Supporting Results, Weight Quantization
 and Parallel Drafting. Protocols and results each have one authoritative location.
 
 ## Next-run checkpoint
 
 - The completed throughput grid has three process repetitions per cell. Raw
   runs and frozen source snapshots under `outputs/` must remain unchanged.
-- Outstanding: isolate the attention split change at 8B/64K, batch 19 (one
-  split), and 8B/128K, batch 9 (two splits). Compare one and two splits at each
-  shape, including output checks, before finalizing cross-context speedup claims.
-  That comparison has not run; no split-policy change has been made.
-- Quality for the current loader remains unmeasured. Earlier quality results
-  in the report retain their original implementation label.
-- Prepare a new plan only when requested. Preserve EOS-aware timing, the
-  prefill barrier, one common-capacity batch per process and three repetitions.
-  GPU authorization and repetition placement belong in that frozen plan.
+- Attention split dispatch is calibrated across nine workloads and six shapes,
+  with three fresh processes per shape. Separate draft/verifier scratch supports
+  every captured request batch; source/runtime guards reject stale calibration.
+  See `outputs/evidence/attention-tuning.json`. Validation: 255 CPU tests,
+  45 GPU tests, 54 calibrated kernel cases, all eight hierarchical methods,
+  native FP8, and an 8B/64K batch-19 integration check. These are not new throughput
+  results. Earlier measurements retain their original implementation labels.
+- The authorized rerun uses B200-2 GPUs 0–3 when idle. See
+  `outputs/evidence/main-campaign.json` for frozen plan paths and source hashes.
+  Scope: seven methods, 126 throughput processes, 42 quality processes and
+  42 adaptive capacity checks. Direct Highlight AR with hierarchical KV and
+  native FP8 is excluded by explicit user instruction. Completed retained
+  measurements are reused with their original source provenance; model and
+  attention computation are unchanged. Finish pending 4B quality before 8B quality.
+  The 8B contexts can run concurrently, with matched repetition assignments
+  across methods within each context. Quality uses FA4 and RULER 64K/128K.
+  LongBench v2 uses the same 60 questions with full-document MoLLE answer-tag
+  prompts, an 8,192-token cap, greedy decoding, thinking off and EOS stopping.
+  Score the letter in the last complete answer tag; a valid capped answer counts.
+- Timing keeps the prefill barrier, EOS, one common-capacity batch per process
+  and three repetitions. Each context must pass capacity and calibrated-split
+  coverage checks before timing. Do not edit frozen plans or source snapshots.
 - The queue requires 60 idle seconds and a cooperative GPU lock. Failed jobs
   stop further dispatch; interrupted jobs require inspection before restart.
   Cleanup does not resume any queue.
-- Cleanup verification: 248 CPU tests passed; 45 GPU or opt-in cases skipped.
-  All seven serving implementation files still match the validated source
-  manifest. B200-1 SSH returned `Permission denied (publickey)` during the
-  cleanup; restore access and inspect its queue state before dispatch.

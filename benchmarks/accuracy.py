@@ -41,6 +41,56 @@ COT_ANSWER_PROMPT = (
     'Format your response as follows: "The correct answer is (insert answer here)".'
 )
 COT_ANSWER_TOKENS = 128  # the official answer limit; the reasoning limit is --gen
+ANSWER_TAG_TOKENS = 8192
+ANSWER_TAG_FORMAT = "molle-answer-tags"
+
+
+def answer_record(q: dict, document: str = "") -> dict:
+    """Use the same multiple-choice prompt and extraction contract as MoLLE."""
+    return dict(context=document, question=q["question"], choices=q["choices"],
+                prompt_kind="mc", enable_thinking=False, prefill_answer_tag=True,
+                strict_tag=True, scorer_kind="mc_letter", answer_letter=q["answer"])
+
+
+def score_answer_tags(text: str, q: dict) -> tuple[str | None, bool]:
+    from spotattention.data._scorers import extract_answer, score_row
+
+    record = answer_record(q)
+    extracted, tagged = extract_answer(text, record)
+    match = re.search(r"\b([A-D])\b", extracted) if tagged else None
+    return (match.group(1) if match else None), bool(score_row(extracted, tagged, record))
+
+
+def prepare_answer_tags(questions: Path, checkpoint: str, out: Path) -> dict:
+    """Freeze new prompts for exactly the existing question IDs and gold answers."""
+    from transformers import AutoTokenizer
+    from spotattention.data._prompts import MC_TEMPLATE, SYSTEM_PROMPT, render_prompt
+
+    if out.exists():
+        raise ValueError("use a new question manifest")
+    manifest, rows = load_questions(questions)
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+    documents = load_documents(manifest, rows, tokenizer)
+    prepared = []
+    for q in rows:
+        prompt = render_prompt(answer_record(q, documents[q["id"]]), tokenizer, enable_thinking=False)
+        ids = tokenizer.encode(prompt, add_special_tokens=False)
+        if len(ids) > manifest["ctx"]:
+            raise ValueError(f"question {q['id']}: answer-tag prompt exceeds context budget")
+        prepared.append({**q, "prompt_token_ids": ids, "prompt_sha256": decode.digest(ids),
+                         "prompt_tokens": len(ids)})
+    if manifest["ctx"] + ANSWER_TAG_TOKENS > 131072:
+        raise ValueError("question and output budgets exceed the agreed context limit")
+    protocol = {**manifest["protocol"], "prompt_format": ANSWER_TAG_FORMAT,
+                "template": MC_TEMPLATE, "system_prompt": SYSTEM_PROMPT,
+                "prefill_answer_tag": True, "strict_tag": True,
+                "generation_tokens": ANSWER_TAG_TOKENS,
+                "scoring": "MoLLE mc_letter; complete answer tags required; EOS not required for a valid answer"}
+    result = {**manifest, "protocol": protocol, "questions": prepared,
+              "source_manifest": str(questions), "source_manifest_sha256": decode.digest(manifest)}
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_json(out, result)
+    return result
 
 
 def render(template: str, q: dict, *, document: str | None = None, cot: str | None = None) -> str:
@@ -101,7 +151,9 @@ def parse_args(argv=None):
     decode.add_engine_args(p)
     p.add_argument("--questions", required=True, help="manifest from thesis's accuracy prepare")
     p.add_argument("--gen", type=int, default=128, help="output token limit; with --cot, the reasoning limit (official 1024)")
-    p.add_argument("--cot", action="store_true", help="LongBench v2 official chain of thought")
+    format_args = p.add_mutually_exclusive_group()
+    format_args.add_argument("--cot", action="store_true", help="LongBench v2 official chain of thought")
+    format_args.add_argument("--answer-tags", action="store_true", help="single-stage MoLLE answer-tag prompts")
     p.add_argument("--out", required=True)
     args = p.parse_args(argv)
     args.batch = 1
@@ -131,6 +183,13 @@ def main(argv=None) -> None:
 
     args = parse_args(argv)
     manifest, rows = load_questions(Path(args.questions))
+    if args.answer_tags:
+        if (manifest["protocol"].get("prompt_format") != ANSWER_TAG_FORMAT
+                or manifest["protocol"].get("generation_tokens") != ANSWER_TAG_TOKENS
+                or args.gen != ANSWER_TAG_TOKENS):
+            raise ValueError("answer-tag evaluation requires its frozen prompts and 8192-token cap")
+    elif manifest["protocol"].get("prompt_format") == ANSWER_TAG_FORMAT:
+        raise ValueError("answer-tag prompts require --answer-tags")
     args.ctx = manifest["ctx"]
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -203,6 +262,7 @@ def main(argv=None) -> None:
             "reasoning_tokens": args.gen,
             "answer_tokens": COT_ANSWER_TOKENS,
         } if args.cot else None,
+        "answer_format": ANSWER_TAG_FORMAT if args.answer_tags else None,
         "provenance": {
             "versions": {n: importlib.metadata.version(n) for n in ("torch", "vllm", "triton")},
             "spotattention_commit": decode.git_sha(Path(spotattention.__file__).parent),
@@ -233,11 +293,12 @@ def main(argv=None) -> None:
                 )
             else:
                 answer = generate(q["prompt_token_ids"], params)
-            prediction = extract_answer(answer.text)
+            prediction, correct = (score_answer_tags(answer.text, q) if args.answer_tags
+                                   else (extract_answer(answer.text), None))
             complete = answer.finish_reason == "stop"
             row.update(
                 prediction=prediction,
-                correct=complete and prediction == q["answer"],
+                correct=correct if args.answer_tags else complete and prediction == q["answer"],
                 complete=complete,
                 parsed=prediction is not None,
                 output_text=answer.text,

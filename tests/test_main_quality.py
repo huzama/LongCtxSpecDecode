@@ -18,6 +18,63 @@ def test_quality_scope_preserves_cohorts_and_excludes_answer_only():
     assert all('answer-only' not in j['name'] for j in jobs)
 
 
+def test_explicit_method_subset_verifies_complete_cohorts(tmp_path, monkeypatch):
+    methods = [m for m in quality.QUALITY_METHODS if m not in ('direct8', quality.FP8)]
+    jobs = quality.make_jobs(Path('/runtime'), tmp_path, '4b', methods)
+    assert len(jobs) == 21
+    assert {j['method'] for j in jobs} == set(methods)
+    assert all(sum(j['expected_rows'] for j in jobs if j['method'] == m) == 444 for m in methods)
+    plan = dict(schema='main-quality-v1', host=quality.socket.gethostname(), model='4b',
+        runtime_root='/runtime', allowed_gpus=[2,3], protocol=dict(methods=methods), jobs=jobs)
+    save(tmp_path/'plan.json', plan)
+    monkeypatch.setattr(quality, '_verify_payload', lambda plan: None)
+    assert quality.verify_plan(tmp_path) == plan
+
+
+@pytest.mark.parametrize('methods', [[], ['dense8', 'dense8'], ['unknown'], 'dense8', [None]])
+def test_quality_rejects_invalid_method_subsets(methods):
+    with pytest.raises(ValueError, match='invalid quality methods'):
+        quality.make_jobs(Path('/runtime'), Path('/run'), '4b', methods)
+
+
+@pytest.mark.parametrize('change', ['missing_cohort', 'extra_method', 'changed_budget', 'gpu'])
+def test_quality_subset_still_rejects_unagreed_jobs(tmp_path, monkeypatch, change):
+    methods = ['dense8', 'highlight4-sv25']
+    jobs = quality.make_jobs(Path('/runtime'), tmp_path, '4b', methods)
+    plan = dict(schema='main-quality-v1', host=quality.socket.gethostname(), model='4b',
+        runtime_root='/runtime', allowed_gpus=[2,3], protocol=dict(methods=methods), jobs=jobs)
+    if change == 'missing_cohort': jobs.pop()
+    elif change == 'extra_method': jobs.append(quality.make_jobs(Path('/runtime'), tmp_path, '4b', ['direct8'])[0])
+    elif change == 'changed_budget': jobs[0]['expected_rows'] = 1
+    else: plan['allowed_gpus'] = [0,1]
+    save(tmp_path/'plan.json', plan)
+    monkeypatch.setattr(quality, '_verify_payload', lambda plan: None)
+    with pytest.raises(ValueError, match='quality scope or GPU authorization changed'):
+        quality.verify_plan(tmp_path)
+
+
+@pytest.mark.parametrize('stage', ['ruler', 'longbench'])
+@pytest.mark.parametrize('method', ['highlight4-sv50', quality.FP8])
+@pytest.mark.parametrize('backend', ['triton', 'fa4'])
+def test_quality_worker_forwards_frozen_backend(tmp_path, monkeypatch, stage, method, backend):
+    from benchmarks import ruler, accuracy
+    job = dict(name='job', method=method, stage=stage, ctx=65536)
+    save(tmp_path/'plan.json', dict(allowed_gpus=[2,3], jobs=[job],
+        protocol=dict(attention_backend=backend), inputs=dict(checkpoint='/model',
+        questions='/questions', ruler={'65536':'/rows'})))
+    calls=[]
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', '2')
+    monkeypatch.setattr(ruler, 'run', lambda argv: calls.append(argv))
+    monkeypatch.setattr(accuracy, 'main', lambda argv: calls.append(argv))
+    monkeypatch.setattr(quality, 'validate', lambda *args: {})
+    quality.run_job(tmp_path, 'job')
+    argv=calls[0]
+    if method == quality.FP8:
+        assert '--native-fp8-highlight' in argv and '--hierarchical-attention-backend' not in argv
+    else:
+        assert argv[argv.index('--hierarchical-attention-backend')+1] == backend
+
+
 @pytest.mark.parametrize('failure', [None, '4b-quality', '8b-throughput'])
 def test_pipeline_never_advances_past_failed_stage(tmp_path, monkeypatch, failure):
     paths = {name: tmp_path/name for name in ('4b-quality','8b-throughput','8b-quality')}
@@ -80,6 +137,22 @@ def test_recovery_preserves_evidence_and_only_queues_unfinished(recovery_parent)
     assert not set(plan['recovery']['completed_audits']) & {j['name'] for j in plan['jobs']}
     assert partial.exists() and all(p.read_bytes()==value for p,value in originals.items())
     assert all(j['command'][-3]==str(out) for j in plan['jobs'])
+
+
+def test_subset_recovery_preserves_methods_and_completed_results(recovery_parent):
+    parent, out, _ = recovery_parent
+    methods = [m for m in quality.QUALITY_METHODS if m not in ('direct8', quality.FP8)]
+    plan = load(parent/'plan.json')
+    plan['protocol']['methods'] = methods
+    plan['jobs'] = [j for j in plan['jobs'] if j['method'] in methods]
+    state = load(parent/'status.json')
+    state['jobs'] = [j for j in state['jobs'] if j['method'] in methods]
+    save(parent/'plan.json', plan);save(parent/'status.json', state)
+    result = quality.prepare_recovery(parent, out, [2,3])
+    checked = quality.verify_plan(out)
+    assert (result['preserved'], result['remaining']) == (1,20)
+    assert checked['protocol']['methods'] == methods
+    assert {j['method'] for j in checked['jobs']} == set(methods)
 
 
 def test_nested_recovery_restricts_gpus_without_repeating_completed_runs(recovery_parent):

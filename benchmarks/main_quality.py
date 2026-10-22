@@ -21,11 +21,18 @@ from benchmarks.queue import source_digest
 QUALITY_METHODS = (*METHODS, FP8)
 
 
-def make_jobs(runtime, run, model):
+def make_jobs(runtime, run, model, methods=None, longbench_format="cot"):
+    if longbench_format not in ("cot", "answer-tags"):
+        raise ValueError("invalid LongBench format")
+    methods = QUALITY_METHODS if methods is None else methods
+    if (not isinstance(methods, (list, tuple)) or not methods
+            or any(not isinstance(method, str) or method not in QUALITY_METHODS for method in methods)
+            or len(set(methods)) != len(methods)):
+        raise ValueError("invalid quality methods")
     jobs = []
     for stage, ctx in (("ruler", 65536), ("ruler", 129024), ("longbench", None)):
-        for method in QUALITY_METHODS:
-            name = f"{stage}/{model}/{ctx or 'cot'}/{method}"
+        for method in methods:
+            name = f"{stage}/{model}/{ctx or longbench_format}/{method}"
             jobs.append(dict(name=name, kind="main-quality", stage=stage, model=model,
                 ctx=ctx, method=method, expected_rows=192 if stage == "ruler" else 60,
                 command=[str(runtime/".venv/bin/python"), "-P", "-m", "benchmarks.main_quality",
@@ -115,7 +122,8 @@ def prepare_recovery(parent, out, gpus):
             raise ValueError("unexpected parent quality scope")
         if "recovery" in previous:
             verify_plan(parent)
-        elif previous["jobs"] != make_jobs(Path(previous["runtime_root"]), parent, previous["model"]):
+        elif previous["jobs"] != make_jobs(Path(previous["runtime_root"]), parent, previous["model"],
+                                           previous["protocol"].get("methods")):
             raise ValueError("unexpected parent quality scope")
         _verify_payload(previous)
         states = {j["name"]: j for j in state["jobs"]}
@@ -124,7 +132,8 @@ def prepare_recovery(parent, out, gpus):
         completed = {j["name"]: validate(j, parent/j["name"]) for j in previous["jobs"]
                      if states[j["name"]]["state"] == "complete"}
         parent_names = {j["name"] for j in previous["jobs"]}
-        jobs = [j for j in make_jobs(Path(previous["runtime_root"]), out, previous["model"])
+        jobs = [j for j in make_jobs(Path(previous["runtime_root"]), out, previous["model"],
+                                    previous["protocol"].get("methods"))
                 if j["name"] in parent_names and j["name"] not in completed]
         if not jobs:
             raise ValueError("quality campaign already complete")
@@ -143,9 +152,18 @@ def prepare_recovery(parent, out, gpus):
 
 def verify_plan(run):
     plan = load(run/"plan.json")
-    expected = make_jobs(Path(plan["runtime_root"]), run, plan["model"])
+    expected = make_jobs(Path(plan["runtime_root"]), run, plan["model"],
+                         plan["protocol"].get("methods"), plan["protocol"].get("longbench_format", "cot"))
     allowed = plan["allowed_gpus"]
-    if "recovery" in plan:
+    if plan["schema"] == "main-quality-v2":
+        authorization = plan.get("gpu_authorization", {})
+        gpu_valid = (allowed == authorization.get("allowed_gpus") and bool(allowed)
+                     and len(set(allowed)) == len(allowed) and all(g in range(4) for g in allowed))
+        if (plan["protocol"].get("longbench_format") != "answer-tags"
+                or plan["protocol"].get("longbench_tokens") != 8192
+                or not authorization.get("user_instruction") or "recovery" in plan):
+            raise ValueError("quality answer-tag protocol differs")
+    elif "recovery" in plan:
         recovery = plan["recovery"]
         parent = Path(recovery["parent_run"])
         if (sha(parent/"plan.json") != recovery["parent_plan_sha256"]
@@ -171,7 +189,7 @@ def verify_plan(run):
         gpu_valid = bool(allowed) and len(set(allowed)) == len(allowed) and all(g in range(4) for g in allowed)
     else:
         gpu_valid = allowed == [2, 3]
-    if (plan["schema"] != "main-quality-v1" or plan["host"] != socket.gethostname()
+    if (plan["schema"] not in ("main-quality-v1", "main-quality-v2") or plan["host"] != socket.gethostname()
             or not gpu_valid or plan["jobs"] != expected):
         raise ValueError("quality scope or GPU authorization changed")
     _verify_payload(plan)
@@ -182,7 +200,7 @@ def validate(job, dest):
     """Recompute quality from saved outputs; reject changed cohorts or protocols."""
     from benchmarks import decode
     from benchmarks.multilexsum import output_audit
-    from benchmarks.accuracy import extract_answer as extract_choice
+    from benchmarks.accuracy import ANSWER_TAG_FORMAT, extract_answer as extract_choice, score_answer_tags
     from spotattention.data._scorers import extract_answer, score_row
     run = dest.parents[3]
     plan = load(run/"plan.json")
@@ -190,9 +208,12 @@ def validate(job, dest):
     rows = [json.loads(line) for line in (dest/"results.jsonl").read_text().splitlines()]
     native = job["method"] == FP8
     method = None if native else METHODS[job["method"]]
+    ruler = job["stage"] == "ruler"
+    answer_tags = not ruler and plan["protocol"].get("longbench_format") == "answer-tags"
+    gen = 8192 if answer_tags else 1024
     expected = dict(model=plan["inputs"]["checkpoint"], batch=1, thinking=False, ignore_eos=False,
         async_scheduling=False, prefix_caching=False, dtype="torch.bfloat16", flash_attn_version=4,
-        indexer_cache_format="bf16", gen=1024, seed=42, mode="direct" if native else method.mode,
+        indexer_cache_format="bf16", gen=gen, seed=42, mode="direct" if native else method.mode,
         hierarchical_method=None if native else job["method"],
         backbone_cache="native_fp8_e4m3" if native else "hierarchical_4plus4",
         kv_cache_dtype="fp8_e4m3" if native else "auto", spec_tokens=6 if method and method.speculative else 0)
@@ -214,9 +235,11 @@ def validate(job, dest):
             raise ValueError("native FP8 cache differs")
         if any(layer["element_bytes"] != 1 or any(not math.isfinite(v) or v <= 0 for v in layer["scales"].values()) for layer in cache["layers"]):
             raise ValueError("native FP8 scale or storage failure")
-    elif not cache.get("errors") or any(any(values) for values in cache["errors"].values()):
-        raise ValueError("hierarchical cache transaction failure")
-    ruler = job["stage"] == "ruler"
+    else:
+        if cache.get("attention_backend", "triton") != plan["protocol"].get("attention_backend", "triton"):
+            raise ValueError("quality attention backend differs from the frozen plan")
+        if not cache.get("errors") or any(any(values) for values in cache["errors"].values()):
+            raise ValueError("hierarchical cache transaction failure")
     path = plan["inputs"]["ruler"][str(job["ctx"])] if ruler else plan["inputs"]["questions"]
     manifest = load(path)
     cohort = manifest["rows" if ruler else "questions"]
@@ -225,16 +248,28 @@ def validate(job, dest):
             or config["rows" if ruler else "questions"] != ids
             or config["rows_sha256" if ruler else "manifest_sha256"] != decode.digest(manifest)):
         raise ValueError("quality cohort differs")
-    if not ruler and (not config["cot"] or config["cot"]["reasoning_tokens"] != 1024 or config["cot"]["answer_tokens"] != 128):
+    if answer_tags and (config["cot"] is not None or config.get("answer_format") != ANSWER_TAG_FORMAT
+                        or manifest["protocol"].get("prompt_format") != ANSWER_TAG_FORMAT
+                        or manifest["protocol"].get("generation_tokens") != 8192):
+        raise ValueError("LongBench must use the agreed answer-tag protocol")
+    if not ruler and not answer_tags and (not config["cot"] or config["cot"]["reasoning_tokens"] != 1024 or config["cot"]["answer_tokens"] != 128):
         raise ValueError("LongBench must use the agreed CoT stages")
     scores = []
     for row, original in zip(rows, cohort, strict=True):
-        output_audit(row["output_token_ids"], config["eos_audit_ids"], 1024 if ruler else 128, row["finish_reason"])
+        output_audit(row["output_token_ids"], config["eos_audit_ids"], gen if ruler or answer_tags else 128, row["finish_reason"])
         if ruler:
             extracted, tagged = extract_answer(row["output_text"], original)
             score = score_row(extracted, tagged, original)
             if (row["score"], row["extracted"], row["had_tag"]) != (score, extracted, tagged):
                 raise ValueError("RULER saved score differs from rescoring")
+        elif answer_tags:
+            if (row["prompt_sha256"], row["prompt_tokens"], row["answer"], row["choices"], row["question"]) != (
+                    original["prompt_sha256"], original["prompt_tokens"], original["answer"],
+                    original["choices"], original["question"]):
+                raise ValueError("LongBench prompt or answer differs")
+            prediction, score = score_answer_tags(row["output_text"], original)
+            if (row["prediction"], row["correct"]) != (prediction, score):
+                raise ValueError("LongBench saved score differs from rescoring")
         else:
             output_audit(row["reasoning_token_ids"], config["eos_audit_ids"], 1024, row["reasoning_finish_reason"])
             prediction = extract_choice(row["output_text"])
@@ -251,6 +286,7 @@ def validate(job, dest):
         raise ValueError("LongBench aggregate differs")
     return dict(model=job["model"], stage=job["stage"], ctx=job["ctx"], method=job["method"],
         examples=len(rows), score=value, percent=100*value, source_sha256=plan["source_sha256"],
+        protocol="answer-tags" if answer_tags else "ruler" if ruler else "cot",
         raw_sha256={n: sha(dest/n) for n in ("config.json", "results.jsonl", "finished.json", "cache.json")})
 
 
@@ -262,14 +298,18 @@ def run_job(run, name):
     dest = run/name
     base = (["--checkpoint", plan["inputs"]["checkpoint"], "--mode", "direct", "--native-fp8-highlight"]
             if job["method"] == FP8 else flags(job["method"], plan["inputs"]["checkpoint"]))
+    if job["method"] != FP8:
+        base += ["--hierarchical-attention-backend", plan["protocol"].get("attention_backend", "triton")]
     started = time.monotonic()
     if job["stage"] == "ruler":
         from benchmarks.ruler import run as execute
         argv = base + ["--rows", plan["inputs"]["ruler"][str(job["ctx"])]]
     else:
         from benchmarks.accuracy import main as execute
-        argv = base + ["--questions", plan["inputs"]["questions"], "--cot"]
-    execute(argv + ["--gen", "1024", "--out", str(dest)])
+        argv = base + ["--questions", plan["inputs"]["questions"],
+                       "--answer-tags" if plan["protocol"].get("longbench_format") == "answer-tags" else "--cot"]
+    gen = 8192 if job["stage"] == "longbench" and plan["protocol"].get("longbench_format") == "answer-tags" else 1024
+    execute(argv + ["--gen", str(gen), "--out", str(dest)])
     save(dest/"duration.json", dict(wall_seconds=time.monotonic()-started))
     save(dest/"audit.json", validate(job, dest))
 

@@ -10,6 +10,25 @@ from highlight_spec.hierarchical_config import engine_options
 from benchmarks.queue import eligible
 
 
+def test_common_batch_uses_only_the_frozen_comparison_methods(tmp_path):
+    from benchmarks.main_results import common_batch, save
+    save(tmp_path/'plan.json', {'protocol': {'capacity_methods': ['dense8', 'highlight4-sv25']}})
+    for method, batch in [('dense8', 62), ('highlight4-sv25', 42), ('direct8', 1)]:
+        save(tmp_path/f'capacity/4b/32768/{method}/capacity.json',
+             {'status': 'complete', 'maximum_batch': batch})
+    assert common_batch(tmp_path, '4b', 32768) == 42
+    (tmp_path/'capacity/4b/32768/direct8/capacity.json').unlink()
+    assert common_batch(tmp_path, '4b', 32768) == 42
+
+
+@pytest.mark.parametrize('methods', [[], ['dense8', 'dense8'], ['unknown'], 'dense8', [None]])
+def test_common_batch_rejects_invalid_method_scope(tmp_path, methods):
+    from benchmarks.main_results import common_batch, save
+    save(tmp_path/'plan.json', {'protocol': {'capacity_methods': methods}})
+    with pytest.raises(ValueError, match='capacity_methods'):
+        common_batch(tmp_path, '4b', 32768)
+
+
 def test_expanded_gpu_authorization_preserves_three_paired_repetitions(tmp_path):
     from benchmarks.main_results import campaign_gpus, make_throughput_jobs
     plan=dict(allowed_gpus=[0,1,2,3],repetition_gpus={'1':2,'2':3,'3':0})

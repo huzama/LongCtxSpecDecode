@@ -58,7 +58,7 @@ edit.
 ## Environment
 
 - Runs use `ssh b200-2` or `ssh b200-1`, B200 hosts without `/shared` or Slurm.
-  B200-1 GPUs 0/1/2/3 are authorized; B200-2 remains restricted to GPUs 2/3. The queue requires 60
+  All four physical GPUs (0–3) are authorized on both hosts. The queue requires 60
   seconds idle with no compute process. Never interrupt another workload. Restrict
   each process with `CUDA_VISIBLE_DEVICES`. Keep run artifacts under `outputs/`.
   B200 results stay separate from A6000 results.

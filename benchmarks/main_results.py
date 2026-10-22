@@ -221,7 +221,14 @@ def capacity_candidate(history):
 
 
 def common_batch(run, model, ctx):
-    rows = [load(run/f'capacity/{model}/{ctx}/{method}/capacity.json') for method in METHODS]
+    run = Path(run)
+    plan = load(run/'plan.json') if (run/'plan.json').exists() else {}
+    methods = plan.get('protocol', {}).get('capacity_methods', list(METHODS))
+    if (not isinstance(methods, list) or not methods
+            or any(not isinstance(method, str) or method not in METHODS for method in methods)
+            or len(set(methods)) != len(methods)):
+        raise ValueError('capacity_methods must be a nonempty list of distinct known methods')
+    rows = [load(run/f'capacity/{model}/{ctx}/{method}/capacity.json') for method in methods]
     if any(r.get('status')!='complete' for r in rows):
         raise ValueError('all method capacities must be measured first')
     return min(r['maximum_batch'] for r in rows)
