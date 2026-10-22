@@ -330,10 +330,11 @@ class PagedAttentionWorkspace:
 
 
 def attention_workspace(requests, kv_heads, query_heads, max_queries, max_positions, device,
-                        *, backend='triton'):
+                        *, backend='triton', cache_format='hierarchical8', sparse=False):
     if backend == 'fa4':
         from .hierarchical_native import NativeAttentionWorkspace
-        cls = NativeAttentionWorkspace
+        return NativeAttentionWorkspace(requests, kv_heads, query_heads, max_queries,
+            max_positions, device, cache_format=cache_format, sparse=sparse)
     elif backend == 'triton':
         cls = PagedAttentionWorkspace
     else:

@@ -78,31 +78,55 @@ def _scatter_output(SRC, OUT, QP, QSL, SLOTS, STATE,
 class NativeAttentionWorkspace:
     backend = 'fa4'
 
-    def __init__(self, requests, kv_heads, query_heads, max_queries, max_positions, device):
+    def __init__(self, requests, kv_heads, query_heads, max_queries, max_positions, device,
+                 *, cache_format=None, sparse=False, num_splits=None):
         if (min(requests, kv_heads, query_heads, max_positions) < 1
                 or query_heads % kv_heads or max_queries not in (1, 7)):
             raise ValueError('paged attention requires one or seven queries per request')
         if torch.cuda.get_device_capability(device) != (10, 0):
             raise ValueError('native hierarchical attention requires SM100')
         _check_runtime()
-        from vllm.vllm_flash_attn.cute.interface import num_splits_heuristic
+        from .attention_policy import choose_splits
         self.capacity = requests
+        self.cache_format = cache_format
         self.shape = (requests, kv_heads, query_heads, max_queries, max_positions)
         self.views = 1 if max_queries == 1 else 2
         b = requests*self.views
         sms = torch.cuda.get_device_properties(device).multi_processor_count
-        self.splits = max(1, num_splits_heuristic(
-            requests*kv_heads, sms, tr.cdiv(max_positions, 128), 128))
+        if num_splits is not None and (type(num_splits) is not int or not 1 <= num_splits <= 128):
+            raise ValueError('invalid explicit split count')
+        from vllm.vllm_flash_attn.cute.interface import num_splits_heuristic
+        def select(n):
+            if num_splits is not None:
+                return num_splits
+            if cache_format is None:
+                # Legacy diagnostic callers do not identify their precision.
+                return max(1, num_splits_heuristic(n*kv_heads, sms, tr.cdiv(max_positions,128),128))
+            return choose_splits(n,kv_heads,query_heads,max_queries,max_positions,cache_format,sparse,sms)
+        self.split_counts = {n: select(n) for n in range(1, requests+1)}
+        self.splits = self.split_counts[requests]
         self.q = torch.empty((b, max_queries, query_heads, 128), device=device, dtype=torch.bfloat16)
         self.out = torch.empty_like(self.q)
-        split_buffers = self.splits if self.splits > 1 else 0
-        self.partial = torch.empty((split_buffers, *self.q.shape), device=device, dtype=torch.float32)
-        self.lse = torch.empty((split_buffers, b, query_heads, max_queries), device=device, dtype=torch.float32)
+        # A flat arena supports every smaller request batch without allocating
+        # at capture/replay or keeping the maximum batch's split choice.
+        split_rows = max(n*s if s > 1 else 0 for n, s in self.split_counts.items())
+        elements = split_rows*self.views*max_queries*query_heads
+        self.partial = torch.empty(elements*128, device=device, dtype=torch.float32)
+        self.lse = torch.empty(elements, device=device, dtype=torch.float32)
         self.info = torch.empty((b, 4), device=device, dtype=torch.int32)
         self.qpos = torch.empty((b, max_queries), device=device, dtype=torch.int32)
         self.seq_q = torch.empty(b, device=device, dtype=torch.int32)
         self.seq_k = torch.empty_like(self.seq_q)
         self.compiled = {}
+
+    def for_requests(self, requests):
+        import copy
+        if requests not in self.split_counts:
+            raise ValueError('request batch exceeds the attention allocation')
+        ws = copy.copy(self)
+        ws.shape = (requests, *self.shape[1:])
+        ws.splits = self.split_counts[requests]
+        return ws
 
     def memory_bytes(self):
         return sum(getattr(self, name).numel()*getattr(self, name).element_size()
@@ -215,7 +239,10 @@ def attention(cache, query, query_positions, query_start_loc, slots, block_table
         raise ValueError('invalid output buffer')
     ids, counts = (selected_ids, selected_counts) if sparse else (block_table, slots)
     q, out = workspace.q[:b], workspace.out[:b]
-    partial, lse = workspace.partial[:, :b], workspace.lse[:, :b]
+    splits = workspace.splits if workspace.splits > 1 else 0
+    elements = splits*b*maxq*hq
+    partial = workspace.partial[:elements*128].view(splits, b, maxq, hq, 128)
+    lse = workspace.lse[:elements].view(splits, b, hq, maxq)
     info, qp = workspace.info[:b], workspace.qpos[:b]
     sq, sk = workspace.seq_q[:b], workspace.seq_k[:b]
     _prepare_queries[(b, hq)](query, query_positions, query_start_loc, slots,

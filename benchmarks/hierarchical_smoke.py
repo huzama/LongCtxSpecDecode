@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--method',choices=list(METHODS),required=True)
     parser.add_argument('--context',type=int,default=4093)
     parser.add_argument('--batch',type=int,default=2)
+    parser.add_argument('--gpu-mem-util',type=float,default=.6)
     parser.add_argument('--prefill-fa-version',type=int,choices=[2,4],default=4)
     parser.add_argument('--attention-backend', choices=['triton', 'fa4'], default='triton')
     parser.add_argument('--trace',action='store_true')
@@ -46,7 +47,9 @@ def main():
     config=engine_options(args.method,batch=batch,context=context,generation=cap,
         checkpoint=args.checkpoint,rope=rope,scheduler='benchmarks.decode.BatchScheduler',
         attention_backend=args.attention_backend)
-    config['gpu_memory_utilization']=.6
+    if not 0 < args.gpu_mem_util <= .9:
+        raise ValueError('integration checks require a memory fraction in (0, .9]')
+    config['gpu_memory_utilization']=args.gpu_mem_util
     config['attention_config']['flash_attn_version']=args.prefill_fa_version
     config['worker_extension_cls']='highlight_spec.hierarchical_profile.HierarchicalProfileWorker'
     if args.trace:

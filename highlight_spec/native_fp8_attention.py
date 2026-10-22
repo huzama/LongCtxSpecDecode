@@ -7,7 +7,7 @@ import torch
 from vllm.vllm_flash_attn import flash_attn_varlen_func as _native_varlen
 
 
-def flash_attn_varlen_func(*args, **kwargs):
+def flash_attn_varlen_func(*args, split_config=None, **kwargs):
     q = kwargs.get("q", args[0] if args else None)
     if kwargs.get("fa_version") != 4 or q.dtype not in (torch.float8_e4m3fn, torch.float8_e5m2):
         return _native_varlen(*args, **kwargs)
@@ -27,12 +27,27 @@ def flash_attn_varlen_func(*args, **kwargs):
     values["learnable_sink"] = values.pop("s_aux", None)
     return_lse = values.pop("return_softmax_lse", False)
     values["return_lse"] = return_lse
+    if (split_config is not None and values.get('max_seqlen_q') == 1
+            and values.get('num_splits', 0) <= 0):
+        from .attention_policy import choose_splits
+        positions, sms = split_config
+        values['num_splits'] = choose_splits(values['cu_seqlens_q'].shape[0]-1,
+            values['k'].shape[-2], q.shape[-2], 1, positions, 'fp8', True, sms)
     out, lse, _, _ = _flash_attn_fwd(**values)
     return (out, lse) if return_lse else out
 
 
-def install():
+def install(config=None, molle=None):
     # Only the explicitly selected native FP8 model calls this, in its worker.
     # BF16 and other FA versions continue through the original dispatcher.
     from vllm.v1.attention.backends import flash_attn
-    flash_attn.flash_attn_varlen_func = flash_attn_varlen_func
+    if config is None or molle.selection.mode != 'topk_fraction':
+        flash_attn.flash_attn_varlen_func = flash_attn_varlen_func
+        return None
+    else:
+        from functools import partial
+        from .attention_policy import token_bound
+        bound = token_bound(config.model_config.max_model_len, molle.selection.topk_fraction)
+        sms = torch.cuda.get_device_properties(config.device_config.device).multi_processor_count
+        flash_attn.flash_attn_varlen_func = partial(flash_attn_varlen_func, split_config=(bound, sms))
+        return bound, sms

@@ -85,21 +85,22 @@ class HierarchicalContext:
         # Shared by every attention layer. Allocate before memory profiling so
         # neither the recent buffers nor attention scratch consume hidden KV capacity.
         # vLLM also warms short multi-query batches for an AR-only engine.
-        layouts = {(1, False): self.max_length, (7, False): self.max_length}
-        if selection is not None:
-            layouts[1, True] = max(80, int(self.max_length*max(self.draft_fraction, self.verify_fraction))+96)
-            if self.verify_fraction or not self.speculative:
-                layouts[7, True] = max(80, int(self.max_length*(self.verify_fraction or self.draft_fraction))+96)
+        from .attention_policy import attention_layouts
+        layouts = attention_layouts(self.max_length, selection is not None, self.speculative,
+                                    self.draft_bits, self.draft_fraction, self.verify_fraction)
         self.attention_backend = getattr(hf, 'molle_hierarchical_attention_backend', 'triton')
-        self.workspaces = {key: attention_workspace(n, kv_heads, query_heads, key[0], width, device,
-                                                   backend=self.attention_backend)
-                           for key, width in layouts.items()}
+        self.workspaces = {key: attention_workspace(n, kv_heads, query_heads, key[1], width, device,
+            backend=self.attention_backend, cache_format=f'hierarchical{bits}', sparse=key[2])
+            for key, (bits, width) in layouts.items()}
 
     def sparse_decode(self, drafting):
         return self.selection is not None and (drafting or not self.speculative or self.verify_fraction > 0)
 
-    def workspace(self, requests, queries, sparse=False):
-        ws = copy.copy(self.workspaces[queries, sparse])
+    def workspace(self, requests, queries, sparse=False, drafting=False):
+        original = self.workspaces[drafting, queries, sparse]
+        if hasattr(original, 'for_requests'):
+            return original.for_requests(requests)
+        ws = copy.copy(original)
         ws.shape = (requests, *ws.shape[1:])
         return ws
 
@@ -272,7 +273,7 @@ class HierarchicalImpl(AttentionImpl):
             selected_counts=c.selection.cnt[:md.num_reqs] if sparse else None,
             # The selector already resolves physical pages in this same order.
             selected_page_table=c.selection.cmp_table[:md.num_reqs] if sparse else None,
-            workspace=c.workspace(md.num_reqs, 1 if md.max_query_len == 1 else 7, sparse), output=output[:n])
+            workspace=c.workspace(md.num_reqs, 1 if md.max_query_len == 1 else 7, sparse, md.drafting), output=output[:n])
 
 
 class HierarchicalAttention(Attention):
@@ -483,6 +484,10 @@ class HierarchicalStatsWorker(SelectionStatsWorker):
                     raise RuntimeError("logical and physical selector outputs disagree")
                 selection_checked = True
         return dict(layers=len(layers), errors=errors, attention_backend=c.attention_backend,
+            attention_dispatch=[dict(drafting=key[0],queries=key[1],sparse=key[2],
+                token_bound=ws.shape[-1],cache_format=getattr(ws,'cache_format',None),
+                split_counts=getattr(ws,'split_counts',{ws.shape[0]:ws.splits}))
+                for key,ws in c.workspaces.items()],
             attention_workspace_bytes=sum(ws.memory_bytes() if hasattr(ws, 'memory_bytes') else
                 ws.partial.numel()*ws.partial.element_size()+ws.lse.numel()*ws.lse.element_size()
                 for ws in c.workspaces.values()),

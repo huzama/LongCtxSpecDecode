@@ -48,11 +48,12 @@ class NativeFP8Qwen3Model(Qwen2Model):
     def __init__(self, *, vllm_config, prefix=""):
         molle = NativeFP8Config.from_vllm_config(vllm_config)
         from .native_fp8_attention import install
-        install()
+        split_config = install(vllm_config, molle)
         sel = SelectionBuffers(vllm_config, molle, vllm_config.device_config.device)
         super().__init__(vllm_config=vllm_config, prefix=prefix,
             decoder_layer_type=functools.partial(MolleQwen3DecoderLayer, molle=molle, sel=sel))
         self.molle, self.sel = molle, sel
+        self.attention_split_config = split_config
 
 
 class NativeFP8Qwen3ForCausalLM(MolleQwen3ForCausalLM):
@@ -127,7 +128,18 @@ class NativeFP8StatsWorker(SelectionStatsWorker):
         indexer = runner.model.model.molle
         if indexer.kcache_dtype != torch.bfloat16:
             raise RuntimeError("native FP8 validation requires a BF16 indexer")
+        split_config = runner.model.model.attention_split_config
+        dispatch = None
+        if split_config is not None:
+            from .attention_policy import choose_splits
+            bound, sms = split_config
+            hf = runner.model.config
+            capacity = runner.vllm_config.scheduler_config.max_num_seqs
+            dispatch = dict(token_bound=bound, cache_format='fp8',
+                split_counts={n:choose_splits(n,hf.num_key_value_heads,hf.num_attention_heads,
+                    1,bound,'fp8',True,sms) for n in range(1,capacity+1)})
         return dict(backbone_cache="native_fp8_e4m3", indexer_cache="bf16",
+                    attention_dispatch=dispatch,
                     attention_bridge="native_fa4_with_qkv_descales",
                     scale_policy="vllm_calculate_kv_scales", layers=rows,
                     graph_replays=getattr(self, "_fp8_graph_replays", 0),
