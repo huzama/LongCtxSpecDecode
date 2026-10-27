@@ -68,6 +68,15 @@ def get_attn_backend(
     vllm_config = get_current_vllm_config()
     backend_enum = vllm_config.attention_config.backend
 
+    if kv_cache_dtype == "int4_4":
+        from vllm.v1.attention.backends.hierarchical import HierarchicalAttentionBackend
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        if backend_enum not in (None, AttentionBackendEnum.FLASH_ATTN):
+            raise ValueError("int4_4 KV requires the FlashAttention backend")
+        HierarchicalAttentionBackend.validate_config(vllm_config, head_size, dtype)
+        return HierarchicalAttentionBackend
+
     attn_selector_config = AttentionSelectorConfig(
         head_size=head_size,
         dtype=dtype,

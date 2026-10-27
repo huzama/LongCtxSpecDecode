@@ -4,6 +4,8 @@
 Set VEGAS_TEST_MODEL to a locally cached checkpoint and VEGAS_TEST_FA to 2 or 4.
 Exercises chunked prefill, changing batches, short prefixes, a context boundary,
 and both eager and normal graph execution against the full-attention target.
+VEGAS_TEST_KV=int4_4 uses complete prefills on B200/FA4 with the isolated loader
+overlay from tools/patch_fa4_hierarchical.py and checks that gather storage is zero.
 """
 
 import json
@@ -22,7 +24,11 @@ class MemoryProbe:
         draft = getattr(runner, "drafter", None)
         gathered = draft.attn_overrider._draft_kv if draft is not None else None
         scratch = gathered.k.nbytes + gathered.v.nbytes if gathered is not None else 0
-        return dict(model_bytes=runner.model_memory_usage, gather_bytes=scratch)
+        return dict(
+            model_bytes=runner.model_memory_usage,
+            gather_bytes=scratch,
+            cache_dtype=runner.cache_config.cache_dtype,
+        )
 
 
 def worker(model, version, eager, ratio, output):
@@ -39,7 +45,8 @@ def worker(model, version, eager, ratio, output):
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)
     text = "The archive contains blue, red and green records. The key is amber. " * 1024
     tokens = tokenizer.encode(text)
-    lengths = [17, 257, 1023, 4085]
+    cache_dtype = os.environ.get("VEGAS_TEST_KV", "auto")
+    lengths = [7, 255, 257, 4085] if cache_dtype == "int4_4" else [17, 257, 1023, 4085]
     prompts = [dict(prompt_token_ids=tokens[:n]) for n in lengths]
     params = [
         SamplingParams(
@@ -53,13 +60,14 @@ def worker(model, version, eager, ratio, output):
         seed=41,
         max_model_len=4096,
         max_num_seqs=4,
-        max_num_batched_tokens=256,
+        max_num_batched_tokens=8192 if cache_dtype == "int4_4" else 256,
         gpu_memory_utilization=0.6,
         enforce_eager=eager,
-        enable_chunked_prefill=True,
+        enable_chunked_prefill=cache_dtype != "int4_4",
         enable_prefix_caching=False,
         disable_cascade_attn=True,
         async_scheduling=False,
+        kv_cache_dtype=cache_dtype,
         attention_config=dict(backend="FLASH_ATTN", flash_attn_version=version),
         worker_extension_cls=(
             "tests.v1.spec_decode.sparse_attn.test_vegas_e2e.MemoryProbe"
@@ -81,7 +89,10 @@ def worker(model, version, eager, ratio, output):
     try:
         stats = llm.collective_rpc("vegas_memory")
         results, probabilities = [], []
-        for order in ([0, 1, 2, 3], [2], [1, 0, 2], [3, 0]):
+        # A seven-token prompt must take prefill even though it matches the
+        # verifier's capture width, including after a request-slot reuse.
+        single = [0] if cache_dtype == "int4_4" else [2]
+        for order in ([0, 1, 2, 3], single, [1, 0, 2], [3, 0]):
             generated = llm.generate(
                 [prompts[i] for i in order], [params[i] for i in order], use_tqdm=False
             )
@@ -182,7 +193,10 @@ def test_greedy_verification_and_batch_lifecycle(engines, eager, ratio):
                     break
     assert len(dense["memory"]) == len(vegas["memory"])
     for base, stats in zip(dense["memory"], vegas["memory"]):
-        assert stats["gather_bytes"] > 0
+        if stats["cache_dtype"] == "int4_4":
+            assert stats["gather_bytes"] == 0
+        else:
+            assert stats["gather_bytes"] > 0
         assert stats["model_bytes"] - base["model_bytes"] >= stats["gather_bytes"]
 
 

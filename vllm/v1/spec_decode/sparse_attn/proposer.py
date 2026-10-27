@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from copy import copy
 from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
 )
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.triton_utils import triton
@@ -36,7 +38,7 @@ from vllm.v1.spec_decode.utils import (
     eagle_prepare_next_token_padded_kernel,
     gather_draft_hidden_states,
 )
-from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -96,6 +98,9 @@ class SparseAttnProposer:
             self.speculative_config.num_speculative_tokens
         self.block_size = vllm_config.cache_config.block_size
         self.hidden_size = vllm_config.model_config.get_hidden_size()
+        self._hierarchical = vllm_config.cache_config.cache_dtype == "int4_4"
+        self._is_vegas = self.speculative_config.sparse_attn_algorithm == "vegas"
+        self._draft_batch_descriptor: BatchDescriptor | None = None
 
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.token_arange_np = np.arange(max_batch_size)
@@ -160,6 +165,16 @@ class SparseAttnProposer:
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
         # This should be called BEFORE adjust_cudagraph_sizes_for_spec_decode.
+        if self._is_vegas:
+            # The verifier rounds its capture sizes to multiples of gamma+1.
+            # Draft dispatch must retain its one-token sizes and upper bound.
+            self.cudagraph_dispatcher.compilation_config = copy(
+                self.vllm_config.compilation_config)
+            if (self.speculative_config.enforce_eager
+                    or self.vllm_config.model_config.enforce_eager):
+                cudagraph_mode = CUDAGraphMode.NONE
+            elif cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
+                cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
         self.cudagraph_dispatcher.initialize_cudagraph_keys(cudagraph_mode)
 
     def get_draft_probs(
@@ -251,10 +266,16 @@ class SparseAttnProposer:
         self._prev_req_id_to_index = req_id_to_index.copy()
 
     def _enter_propose(self):
+        if self._hierarchical:
+            self.runner.hierarchical_context.drafting = True
         self.attn_overrider.enter_propose()
 
     def _exit_propose(self):
-        self.attn_overrider.exit_propose()
+        try:
+            self.attn_overrider.exit_propose()
+        finally:
+            if self._hierarchical:
+                self.runner.hierarchical_context.drafting = False
 
     @_method_wrapper(enter_fn=_enter_propose, exit_fn=_exit_propose)
     def propose(
@@ -286,6 +307,10 @@ class SparseAttnProposer:
         # Mask out the positions that exceed the max model length.
         # Otherwise, we may get out-of-range error in RoPE.
         positions = common_attn_metadata.seq_lens
+        if self._hierarchical:
+            self.runner.hierarchical_context.draft_committed.zero_()
+            self.runner.hierarchical_context.draft_committed[:num_tokens].copy_(
+                positions)
         exceeds_max_model_len = positions >= self.max_model_len
         clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
         self.positions[:num_tokens] = clamped_positions
@@ -302,18 +327,48 @@ class SparseAttnProposer:
         # their sequence lengths to 1 to minimize their overheads in attention.
         common_attn_metadata.seq_lens = clamped_positions + 1
 
-        # Compute the slot mapping.
-        block_numbers = clamped_positions // self.block_size
-        block_ids = common_attn_metadata.block_table_tensor.gather(
-            dim=1, index=block_numbers.view(-1, 1))
-        block_ids = block_ids.view(-1)
-        common_attn_metadata.slot_mapping[:num_tokens].copy_((
-            block_ids * self.block_size + clamped_positions % self.block_size))
-        # Mask out the slot mappings that exceed the max model length.
-        # Otherwise, the KV cache will be updated with the padding tokens.
-        common_attn_metadata.slot_mapping[:num_tokens].masked_fill_(
-            exceeds_max_model_len, PADDING_SLOT_ID)
-        slot_mapping = common_attn_metadata.slot_mapping[:num_tokens]
+        if not self._hierarchical:
+            # Compute physical slots for the native KV cache update.
+            block_numbers = clamped_positions // self.block_size
+            block_ids = common_attn_metadata.block_table_tensor.gather(
+                dim=1, index=block_numbers.view(-1, 1))
+            block_ids = block_ids.view(-1)
+            common_attn_metadata.slot_mapping[:num_tokens].copy_((
+                block_ids * self.block_size + clamped_positions % self.block_size))
+            # Overflow rows must not update the KV cache.
+            common_attn_metadata.slot_mapping[:num_tokens].masked_fill_(
+                exceeds_max_model_len, PADDING_SLOT_ID)
+            slot_mapping = common_attn_metadata.slot_mapping[:num_tokens]
+
+        cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = \
+            self._determine_batch_execution_and_padding(num_tokens)
+        if self._is_vegas:
+            self._draft_seq_lens.zero_()
+            self._draft_seq_lens[:num_tokens].copy_(
+                common_attn_metadata.seq_lens)
+            self._draft_slots.fill_(PADDING_SLOT_ID)
+            if self._hierarchical:
+                # Packed cache updates resolve pages from positions and the
+                # block table; slot_mapping is only an activity marker.
+                self._draft_slots[:num_tokens].zero_()
+                self._draft_slots[:num_tokens].masked_fill_(
+                    exceeds_max_model_len, PADDING_SLOT_ID)
+            else:
+                self._draft_slots[:num_tokens].copy_(slot_mapping)
+                # A draft graph can have more rows than the preceding verifier.
+                # Do not reinterpret stale physical selections as logical IDs.
+                if num_tokens < num_input_tokens:
+                    self.attn_overrider._topk_budget[
+                        num_tokens:num_input_tokens].zero_()
+                    self.attn_overrider._topk_valid_lens[
+                        num_tokens:num_input_tokens].zero_()
+            blocks = common_attn_metadata.block_table_tensor
+            self._draft_blocks[:num_tokens, :blocks.shape[1]].copy_(
+                blocks[:num_tokens])
+            self.input_ids[num_tokens:num_input_tokens].zero_()
+            self.positions[num_tokens:num_input_tokens].zero_()
+            common_attn_metadata = self._draft_common_metadata(num_input_tokens)
+            slot_mapping = self._draft_slots[:num_input_tokens]
 
         if self.attn_metadata_builder is None:
             attn_metadata_builder = self._get_attention_metadata_builder()
@@ -336,9 +391,6 @@ class SparseAttnProposer:
             per_layer_attn_metadata[layer_name] = attn_metadata
             per_layer_slot_mapping[layer_name] = slot_mapping
 
-        cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = \
-            self._determine_batch_execution_and_padding(num_tokens)
-
         model_kwargs = {
             "input_ids": self.input_ids[:num_input_tokens],
             "positions": self.positions[:num_input_tokens],
@@ -351,9 +403,10 @@ class SparseAttnProposer:
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
+            batch_descriptor=self._draft_batch_descriptor,
             slot_mapping=per_layer_slot_mapping,
         ):
-            hidden_states = self.model(**model_kwargs)
+            hidden_states = self._draft_forward(0, model_kwargs)
             self._save_hidden_states_and_sample(
                 draft_depth=0,
                 hidden_states=hidden_states,
@@ -384,23 +437,26 @@ class SparseAttnProposer:
             # field (reused across steps): common_attn_metadata.max_seq_len is
             # fixed before the loop, so reading it here would pin max_seq_len
             # at +1 even though seq_lens grows by one every step.
-            attn_metadata.max_seq_len = \
-                min(attn_metadata.max_seq_len + 1, self.max_model_len)
+            if not self._is_vegas:
+                attn_metadata.max_seq_len = \
+                    min(attn_metadata.max_seq_len + 1, self.max_model_len)
             attn_metadata.seq_lens[:num_tokens].copy_(clamped_positions + 1)
 
-            # Compute the slot mapping.
-            block_numbers = clamped_positions // self.block_size
-            block_ids = attn_metadata.block_table.gather(
-                dim=1, index=block_numbers.view(-1, 1))
-            block_ids = block_ids.view(-1)
-            slot_mapping.copy_(
-                block_ids * self.block_size +
-                clamped_positions % self.block_size
-            )
+            if not self._hierarchical:
+                # Compute physical slots for the native KV cache update.
+                block_numbers = clamped_positions // self.block_size
+                block_ids = attn_metadata.block_table[:num_tokens].gather(
+                    dim=1, index=block_numbers.view(-1, 1))
+                block_ids = block_ids.view(-1)
+                slot_mapping[:num_tokens].copy_(
+                    block_ids * self.block_size +
+                    clamped_positions % self.block_size
+                )
             # Mask out the slot mappings that exceed the max model length.
             # Otherwise, the KV cache will be inadvertently updated with
             # the padding tokens.
-            slot_mapping.masked_fill_(exceeds_max_model_len, PADDING_SLOT_ID)
+            slot_mapping[:num_tokens].masked_fill_(
+                exceeds_max_model_len, PADDING_SLOT_ID)
 
             model_kwargs = {
                 "input_ids": self.input_ids[:num_input_tokens],
@@ -414,9 +470,10 @@ class SparseAttnProposer:
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                batch_descriptor=self._draft_batch_descriptor,
                 slot_mapping=per_layer_slot_mapping,
             ):
-                hidden_states = self.model(**model_kwargs)
+                hidden_states = self._draft_forward(step, model_kwargs)
                 # Get the logits and sample the next token.
                 self._save_hidden_states_and_sample(
                     draft_depth=step,
@@ -567,6 +624,104 @@ class SparseAttnProposer:
             vllm_config=self.vllm_config,
             device=self.device,
         )
+        if self._is_vegas:
+            max_batch = self.vllm_config.scheduler_config.max_num_seqs
+            max_blocks = (self.max_model_len + self.block_size - 1) // self.block_size
+            self._draft_seq_lens = torch.zeros(
+                max_batch, dtype=torch.int32, device=self.device)
+            self._draft_slots = torch.full(
+                (max_batch,), PADDING_SLOT_ID, dtype=torch.int64,
+                device=self.device)
+            self._draft_blocks = torch.zeros(
+                max_batch, max_blocks, dtype=torch.int32, device=self.device)
+            self._draft_query_start = torch.arange(
+                max_batch + 1, dtype=torch.int32, device=self.device)
+            self._draft_query_start_cpu = torch.arange(
+                max_batch + 1, dtype=torch.int32)
+            # The model and its weights stay shared. Separate caches keep the
+            # first-draft setup distinct from subsequent append-only forwards.
+            self._draft_forward_models = (
+                CUDAGraphWrapper(target_model, self.vllm_config,
+                                 runtime_mode=CUDAGraphMode.FULL),
+                CUDAGraphWrapper(target_model, self.vllm_config,
+                                 runtime_mode=CUDAGraphMode.FULL),
+            )
+
+    def _draft_common_metadata(self, batch_size: int) -> CommonAttentionMetadata:
+        """Stable tensor addresses and bounds for a padded one-token forward."""
+        return CommonAttentionMetadata(
+            query_start_loc=self._draft_query_start[:batch_size + 1],
+            query_start_loc_cpu=self._draft_query_start_cpu[:batch_size + 1],
+            seq_lens=self._draft_seq_lens[:batch_size],
+            num_reqs=batch_size,
+            num_actual_tokens=batch_size,
+            max_query_len=1,
+            max_seq_len=self.max_model_len,
+            block_table_tensor=self._draft_blocks[:batch_size],
+            slot_mapping=self._draft_slots[:batch_size],
+            causal=True,
+        )
+
+    def _draft_forward(self, step: int, model_kwargs: dict) -> torch.Tensor:
+        if not self._is_vegas:
+            return self.model(**model_kwargs)
+        with record_function_or_nullcontext("sparse_attn: draft forward"):
+            return self._draft_forward_models[int(step > 0)](**model_kwargs)
+
+    @torch.inference_mode()
+    def capture_draft_graphs(self) -> None:
+        """Capture individual forwards in the runner's native capture window."""
+        if not self._is_vegas:
+            return
+        builder = self._get_attention_metadata_builder()
+        for mode, descriptors in self.cudagraph_dispatcher.get_capture_descs():
+            if mode != CUDAGraphMode.FULL:
+                continue
+            for descriptor in descriptors:
+                batch = descriptor.num_tokens
+                common = self._draft_common_metadata(batch)
+                metadata = builder.build_for_drafting(common, draft_index=0)
+                per_layer_metadata = {
+                    name: metadata for name in self.attn_layer_names}
+                per_layer_slots = {
+                    name: common.slot_mapping for name in self.attn_layer_names}
+                kwargs = dict(input_ids=self.input_ids[:batch],
+                              positions=self.positions[:batch], inputs_embeds=None)
+                warmups = self.vllm_config.compilation_config.cudagraph_num_of_warmups
+                for run_mode in [CUDAGraphMode.NONE] * max(1, warmups) + [mode]:
+                    self.input_ids[:batch].zero_()
+                    self.positions[:batch].zero_()
+                    self._draft_seq_lens.zero_()
+                    self._draft_seq_lens[:batch].fill_(1)
+                    self._draft_slots.fill_(PADDING_SLOT_ID)
+                    self._draft_slots[:batch].zero_()
+                    self._draft_blocks.zero_()
+                    if self._hierarchical:
+                        self.runner.hierarchical_context.draft_committed.zero_()
+                    # No live requests exist during capture. Seed valid empty
+                    # selections so first-draft slot construction stays in bounds.
+                    self.attn_overrider._page_table.zero_()
+                    self.attn_overrider._topk_budget.zero_()
+                    self.attn_overrider._topk_valid_lens.zero_()
+                    self._enter_propose()
+                    try:
+                        for step in range(min(2, self.num_speculative_tokens)):
+                            if step:
+                                self.positions[:batch].fill_(1)
+                                self._draft_seq_lens[:batch].fill_(2)
+                                if not self._hierarchical:
+                                    self._draft_slots[:batch].fill_(1)
+                            with set_forward_context(
+                                per_layer_metadata,
+                                self.vllm_config,
+                                num_tokens=batch,
+                                cudagraph_runtime_mode=run_mode,
+                                batch_descriptor=descriptor,
+                                slot_mapping=per_layer_slots,
+                            ):
+                                self._draft_forward(step, kwargs)
+                    finally:
+                        self._exit_propose()
 
     @torch.inference_mode()
     @_method_wrapper(enter_fn=_enter_propose, exit_fn=_exit_propose)
@@ -578,6 +733,10 @@ class SparseAttnProposer:
         attn_metadata: dict[str, FlashAttentionMetadata] | None = None,
         slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
+        # Vegas drafts have their own one-token metadata and capture pass.
+        # The runner's dummy metadata describes the verifier's multi-token batch.
+        if self._is_vegas:
+            return
         cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = \
             self._determine_batch_execution_and_padding(
                 num_tokens, use_cudagraphs=use_cudagraphs
@@ -652,8 +811,26 @@ class SparseAttnProposer:
         num_tokens: int,
         use_cudagraphs: bool = True,
     ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
+        if (
+            not use_cudagraphs or self.speculative_config.enforce_eager
+                or self.vllm_config.model_config.enforce_eager
+        ):
+            self._draft_batch_descriptor = BatchDescriptor(num_tokens)
+            return CUDAGraphMode.NONE, num_tokens, None
         cudagraph_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
             num_tokens=num_tokens, uniform_decode=True)
+        if (
+            self._is_vegas
+            and self.cudagraph_dispatcher.cudagraph_mode.decode_mode()
+            == CUDAGraphMode.FULL
+            and cudagraph_mode != CUDAGraphMode.FULL
+        ):
+            raise RuntimeError(
+                "Vegas draft requires a FULL CUDA graph for "
+                f"{num_tokens} requests ({num_tokens} tokens of capture "
+                "capacity). Increase cudagraph_capture_sizes or "
+                "max_cudagraph_capture_size to cover this batch."
+            )
         num_tokens_padded = batch_desc.num_tokens
 
         # Extra coordination when running data-parallel since we need to
@@ -687,4 +864,5 @@ class SparseAttnProposer:
                 assert batch_desc.num_tokens == num_tokens_padded
                 num_tokens_across_dp[dp_rank] = num_tokens_padded
 
+        self._draft_batch_descriptor = batch_desc
         return cudagraph_mode, num_tokens_padded, num_tokens_across_dp

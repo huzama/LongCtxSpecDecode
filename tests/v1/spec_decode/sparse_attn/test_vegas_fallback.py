@@ -200,6 +200,7 @@ def test_draft_tail_stops_at_context_limit_and_ignores_padding(monkeypatch):
 
     probe = Probe.__new__(Probe)
     probe.num_layers, probe.batch_size, probe.curr_layer = 1, 4, 0
+    probe._hierarchical = False
     probe.num_spec_tokens, probe.max_model_len, probe.block_size = 6, 32, 16
     probe._metadata_initialized = False
     probe._page_table = torch.full((1, 4, 16), -1, device="cuda", dtype=torch.int32)

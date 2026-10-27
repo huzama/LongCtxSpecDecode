@@ -23,6 +23,7 @@ BlockSize = Literal[1, 8, 16, 32, 64, 128, 256]
 CacheDType = Literal[
     "auto",
     "bfloat16",
+    "int4_4",
     "fp8",
     "fp8_e4m3",
     "fp8_e5m2",
@@ -58,6 +59,7 @@ class CacheConfig:
     """Size of the CPU swap space per GPU (in GiB)."""
     cache_dtype: CacheDType = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
+    "int4_4" stores hierarchical four-bit coarse and refinement KV on FA4.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
     fp8 (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using fp8_inc).
     Some models (namely DeepSeekV3.2) default to fp8, set to bfloat16 to use

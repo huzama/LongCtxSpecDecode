@@ -424,6 +424,7 @@ class GPUModelRunner(
 
         Will be lazily initialized when the model is loaded.
         """
+        self.hierarchical_context = None
 
         # Lazy initializations
         # self.model: nn.Module  # Set after load_model
@@ -1126,6 +1127,12 @@ class GPUModelRunner(
                 self.speculative_config.method == "sparse_attn":
             assert isinstance(self.drafter, SparseAttnProposer)
             self.drafter.update_batch_order(self.input_batch.req_id_to_index)
+        if self.hierarchical_context is not None:
+            self.hierarchical_context.update_requests(
+                self.input_batch.req_id_to_index,
+                scheduler_output.finished_req_ids
+                | (scheduler_output.preempted_req_ids or set()),
+            )
 
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
@@ -3113,6 +3120,36 @@ class GPUModelRunner(
             num_reqs=num_reqs,
             force_uniform_decode=force_uniform_decode,
         )
+        has_hierarchical_prefill = False
+        decode_capture_capacity = 0
+        is_vegas = (
+            self.speculative_config is not None
+            and self.speculative_config.method == "sparse_attn"
+            and self.speculative_config.sparse_attn_algorithm == "vegas"
+        )
+        if (
+            (self.cache_config.cache_dtype == "int4_4" or is_vegas)
+            and force_uniform_decode is None
+        ):
+            computed = self.input_batch.num_computed_tokens_cpu[:num_reqs]
+            has_hierarchical_prefill = (
+                self.cache_config.cache_dtype == "int4_4"
+                and bool(np.any(computed == 0)))
+            has_prefill = bool(np.any(
+                computed < self.input_batch.num_prompt_tokens[:num_reqs]))
+            if (
+                not has_prefill
+                and not force_eager
+                and max_num_scheduled_tokens <= self.uniform_decode_query_len
+                and self.compilation_config.cudagraph_mode.decode_mode()
+                == CUDAGraphMode.FULL
+            ):
+                # Attention reads actual query bounds from GPU tensors.
+                # Reuse the seven-query verifier graph for shorter decode rows,
+                # reserving enough request rows even for batches such as [7, 1].
+                decode_capture_capacity = (
+                    num_reqs * self.uniform_decode_query_len)
+                uniform_decode = True
         # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
         # is present). Also, chunked-prefill is disabled, so batch are uniform.
         has_encoder_output = (
@@ -3127,13 +3164,16 @@ class GPUModelRunner(
         )
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
-        num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
+        num_tokens_padded = self._pad_for_sequence_parallelism(
+            max(num_tokens, decode_capture_capacity))
         dispatch_cudagraph = (
             lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
-                disable_full=disable_full,
+                # Initial prompts can have exactly seven tokens too. Captured
+                # packed verifier graphs contain no BF16 prefill/packing path.
+                disable_full=disable_full or has_hierarchical_prefill,
                 num_active_loras=num_active_loras,
             )
             if not force_eager
@@ -3143,6 +3183,16 @@ class GPUModelRunner(
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
             num_tokens_padded, use_cascade_attn or has_encoder_output
         )
+        if (
+            decode_capture_capacity
+            and cudagraph_mode != CUDAGraphMode.FULL
+        ):
+            raise RuntimeError(
+                "Vegas/packed verifier requires a FULL CUDA graph for "
+                f"{num_reqs} requests ({decode_capture_capacity} tokens "
+                "of capture capacity). Increase cudagraph_capture_sizes or "
+                "max_cudagraph_capture_size to cover this batch."
+            )
         num_tokens_padded = batch_descriptor.num_tokens
         if self.compilation_config.pass_config.enable_sp:
             assert (
@@ -4209,6 +4259,13 @@ class GPUModelRunner(
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
                     )
+                if self.cache_config.cache_dtype == "int4_4":
+                    layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+                    contexts = [layer.impl.context for layer in layers.values()]
+                    if not contexts or any(ctx is not contexts[0] for ctx in contexts):
+                        raise RuntimeError(
+                            "Hierarchical attention layers must share one context")
+                    self.hierarchical_context = contexts[0]
                 if hasattr(self, "drafter"):
                     logger.info_once("Loading drafter model...")
                     self.drafter.load_model(self.model)
@@ -5299,6 +5356,9 @@ class GPUModelRunner(
                     batch_descriptors=batch_descs,
                     cudagraph_runtime_mode=runtime_mode,
                 )
+
+            if isinstance(getattr(self, "drafter", None), SparseAttnProposer):
+                self.drafter.capture_draft_graphs()
 
             torch.cuda.synchronize()
             end_free_gpu_memory = torch.cuda.mem_get_info()[0]

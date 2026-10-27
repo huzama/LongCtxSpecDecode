@@ -37,6 +37,7 @@ def _index_to_slot_kernel(
     stride_page_table_row,
     page_size,
     BLOCK_SIZE: tl.constexpr,
+    LOGICAL: tl.constexpr = False,
 ):
     layer_idx = tl.program_id(0)
     batch_idx = tl.program_id(1)
@@ -52,20 +53,16 @@ def _index_to_slot_kernel(
     pt_row_ptr = page_table_ptr + batch_idx * stride_page_table_row
 
     # Part 1: convert top-k indices [0, budget) in-place.
-    for start in tl.range(0, budget, BLOCK_SIZE):
-        offsets = start + tl.arange(0, BLOCK_SIZE)
-        mask = offsets < budget
-
-        index = tl.load(row_ptr + offsets, mask=mask)
-
-        logical_page = index // page_size
-        offset_in_page = index % page_size
-        physical_page = tl.load(
-            pt_row_ptr + logical_page, mask=mask
-        )
-        slot = physical_page * page_size + offset_in_page
-
-        tl.store(row_ptr + offsets, slot, mask=mask)
+    if not LOGICAL:
+        for start in tl.range(0, budget, BLOCK_SIZE):
+            offsets = start + tl.arange(0, BLOCK_SIZE)
+            mask = offsets < budget
+            index = tl.load(row_ptr + offsets, mask=mask)
+            logical_page = index // page_size
+            offset_in_page = index % page_size
+            physical_page = tl.load(pt_row_ptr + logical_page, mask=mask)
+            slot = physical_page * page_size + offset_in_page
+            tl.store(row_ptr + offsets, slot, mask=mask)
 
     # Part 2: generate recent-token indices [valid_len, seqlen),
     #         convert to slots, store at [budget, budget + num_recent).
@@ -77,10 +74,11 @@ def _index_to_slot_kernel(
 
         logical_page = index // page_size
         offset_in_page = index % page_size
-        physical_page = tl.load(
-            pt_row_ptr + logical_page, mask=mask
-        )
-        slot = physical_page * page_size + offset_in_page
+        if LOGICAL:
+            slot = index
+        else:
+            physical_page = tl.load(pt_row_ptr + logical_page, mask=mask)
+            slot = physical_page * page_size + offset_in_page
 
         tl.store(row_ptr + budget + offsets, slot, mask=mask)
 
@@ -113,6 +111,7 @@ class VegasAttnOverrider(BaseAttnOverrider):
             1, device=self.device, dtype=torch.float32)
 
         fa_version = get_flash_attn_version()
+        self._hierarchical = vllm_config.cache_config.cache_dtype == "int4_4"
         if fa_version not in (2, 3, 4):
             raise ValueError("Vegas requires FlashAttention 2, 3, or 4")
         # Only the patched FA3 op exposes scores; FA2/FA4 recompute them.
@@ -138,12 +137,13 @@ class VegasAttnOverrider(BaseAttnOverrider):
                 self.num_layers, self.max_batch_size, self._topk_width,
                 self.block_size, model_config.get_num_kv_heads(parallel_config),
                 model_config.get_head_size(), model_config.dtype, self.device,
-            ) if fa_version != 3 else None
+            ) if fa_version != 3 and not self._hierarchical else None
         )
         logger.info(
             "Vegas on FA%d: %s scores, %s draft KV",
             fa_version,
             "kernel" if self._attn_score_buffer is not None else "recomputed",
+            "packed" if self._hierarchical else
             "gathered" if self._draft_kv is not None else "token-page",
         )
 
@@ -186,6 +186,13 @@ class VegasAttnOverrider(BaseAttnOverrider):
         # Whether sparsity metadata has been initialized.
         self._metadata_initialized = False
 
+        if self._hierarchical:
+            for layer in vllm_config.compilation_config.static_forward_context.values():
+                context = getattr(getattr(layer, "impl", None), "context", None)
+                if context is not None:
+                    context.overrider = self
+                    break
+
         # Learn the top-k single/multi-block crossover for this GPU/shape once,
         # here (outside any CUDA-graph capture) so the per-step call is a cheap
         # cached lookup. Best-effort: fall back to the built-in heuristic if it
@@ -225,6 +232,7 @@ class VegasAttnOverrider(BaseAttnOverrider):
             block_table.stride(0),
             self.block_size,
             BLOCK_SIZE=THREAD_BLOCK_SIZE,
+            LOGICAL=self._hierarchical,
         )
 
         # Repurpose topk_budget to store the number of total valid slots
@@ -244,14 +252,9 @@ class VegasAttnOverrider(BaseAttnOverrider):
             self._draft_kv.begin_propose()
 
     def _draft_attention(self, *args, **kwargs):
-        # Derive the live batch size from this step's own metadata. Under CUDA
-        # graphs the verify pass is replayed as a graph, so the Python
-        # assignment of self.batch_size in _verify_attention does not re-run
-        # and would be stale here. Draft attention runs eagerly each step (the
-        # piecewise split point), so it must match its own inputs to avoid
-        # "batch_size must be equal to batch_size_k" in FA3. Use the number of
-        # sequences (cu_seqlens_q has batch_size + 1 entries), not q.shape[0],
-        # which is the token count (batch*query_len).
+        # Use this forward's request count during eager execution or capture.
+        # A replayed verifier does not update Python state, and its token count
+        # differs from the one-query-per-request draft count.
         self.batch_size = kwargs["cu_seqlens_q"].numel() - 1
 
         # Will be executed only once, resolve sparse kv slots.
@@ -264,7 +267,10 @@ class VegasAttnOverrider(BaseAttnOverrider):
             else:
                 self._init_metadata(*args, **kwargs)
 
-        if self._draft_kv is not None:
+        if self._hierarchical:
+            kwargs["selected_ids"] = self._page_table[self.curr_layer, :self.batch_size]
+            kwargs["selected_counts"] = self._topk_budget[:self.batch_size]
+        elif self._draft_kv is not None:
             self._draft_kv.attention_kwargs(
                 kwargs, self.curr_layer,
                 self._page_table[self.curr_layer, :self.batch_size],
@@ -279,7 +285,12 @@ class VegasAttnOverrider(BaseAttnOverrider):
             kwargs["block_table"] = \
                 self._page_table[self.curr_layer, :self.batch_size]
 
-        return BaseAttnOverrider._original_attn_func(*args, **kwargs)
+        return self._call_attention(*args, **kwargs)
+
+    @staticmethod
+    def _call_attention(*args, **kwargs):
+        function = kwargs.pop("_attention_fn", BaseAttnOverrider._original_attn_func)
+        return function(*args, **kwargs)
 
     def _verify_attention(self, *args, **kwargs):
         # Recomputed weights must match the verifier's plain QK logits.
@@ -304,7 +315,8 @@ class VegasAttnOverrider(BaseAttnOverrider):
 
             # Edge case handling when reducing attention scores.
             single_query = seqlens_q == 1
-            in_prefill = seqlens_q > self.num_spec_tokens + 1
+            in_prefill = (kwargs["prefill_mask"] if "prefill_mask" in kwargs else
+                          seqlens_q > self.num_spec_tokens + 1)
             self._reduce_entry.fill_(0)
             self._reduce_entry[:self.batch_size].masked_fill_(single_query, 1)
             self._reduce_entry[:self.batch_size].masked_fill_(in_prefill, 2)
@@ -315,6 +327,9 @@ class VegasAttnOverrider(BaseAttnOverrider):
                 seqlens_q.masked_fill(in_prefill, 1)
             # Graph padding has no queries and may contain invalid page IDs.
             self._topk_valid_lens[:self.batch_size].masked_fill_(seqlens_q == 0, 0)
+            if "request_slots" in kwargs:
+                self._topk_valid_lens[:self.batch_size].masked_fill_(
+                    kwargs["request_slots"] < 0, 0)
 
             # Calculate per-request budget.
             self._topk_budget[:self.batch_size] = \
@@ -336,13 +351,13 @@ class VegasAttnOverrider(BaseAttnOverrider):
         cu_seqlens_q = kwargs["cu_seqlens_q"]
         if self._use_weight:
             kwargs["return_softmax_lse"] = True
-            out, softmax_lse = BaseAttnOverrider._original_attn_func(
+            out, softmax_lse = self._call_attention(
                 *args, **kwargs)
             softmax_scale = kwargs.get("softmax_scale")
             if softmax_scale is None:
                 softmax_scale = kwargs["q"].shape[-1] ** -0.5
         else:
-            out = BaseAttnOverrider._original_attn_func(*args, **kwargs)
+            out = self._call_attention(*args, **kwargs)
             softmax_lse = self._lse_placeholder
             softmax_scale = 1.0
 
@@ -358,6 +373,13 @@ class VegasAttnOverrider(BaseAttnOverrider):
                 softmax_scale=softmax_scale,
                 use_weight=self._use_weight,
             )
+        elif "hierarchical_cache" in kwargs:
+            from .utils.hierarchical_scores import score_tokens as hierarchical_scores
+
+            hierarchical_scores(
+                kwargs, self._topk_valid_lens[:self.batch_size],
+                self._reduce_entry[:self.batch_size], softmax_lse, softmax_scale,
+                self._use_weight, self._reduced_score_buffer[:self.batch_size])
         else:
             score_tokens(
                 kwargs["q"], kwargs["k"], kwargs["block_table"], cu_seqlens_q,
