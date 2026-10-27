@@ -96,6 +96,8 @@ def build_attention_overrider(
     assert vllm_config.speculative_config is not None
 
     method = vllm_config.speculative_config.sparse_attn_algorithm
+    if method == "vegas" and vllm_config.cache_config.cache_dtype.startswith("fp8"):
+        raise ValueError("Vegas scoring requires an unquantized KV cache")
     if method == "streamingllm":
         from .streamingllm import StreamingLLMAttnOverrider
         cls = StreamingLLMAttnOverrider

@@ -6,13 +6,23 @@ import triton
 import triton.language as tl
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
+from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.spec_decode.sparse_attn.attn_overrider import BaseAttnOverrider
 from vllm.v1.spec_decode.sparse_attn.attn_overrider.utils import (
+    autotune_path,
+    calc_topk_workspace_size,
     varlen_reduce,
     varlen_topk,
-    calc_topk_workspace_size,
-    autotune_path,
 )
+
+from .utils.vegas_fallback import (
+    GatheredDraftKV,
+    kernel_collects_scores,
+    score_tokens,
+)
+
+logger = init_logger(__name__)
 
 
 @triton.jit
@@ -34,7 +44,7 @@ def _index_to_slot_kernel(
     budget = tl.load(budget_ptr + batch_idx)
     valid_len = tl.load(valid_lens_ptr + batch_idx)
     seqlen = tl.load(seqlens_ptr + batch_idx)
-    num_recent = seqlen - valid_len
+    num_recent = tl.maximum(seqlen - valid_len, 0)
 
     row_ptr = (indices_ptr +
                layer_idx * stride_indices_layer +
@@ -102,10 +112,15 @@ class VegasAttnOverrider(BaseAttnOverrider):
         self._lse_placeholder = torch.empty(
             1, device=self.device, dtype=torch.float32)
 
-        # Attention scores collecting buffer.
-        self._attn_score_buffer = torch.empty(
-            self.max_batch_size, self.num_query_heads, 2, self.max_model_len,
-            device=self.device, dtype=torch.bfloat16
+        fa_version = get_flash_attn_version()
+        if fa_version not in (2, 3, 4):
+            raise ValueError("Vegas requires FlashAttention 2, 3, or 4")
+        # Only the patched FA3 op exposes scores; FA2/FA4 recompute them.
+        self._attn_score_buffer = (
+            torch.empty(
+                self.max_batch_size, self.num_query_heads, 2, self.max_model_len,
+                device=self.device, dtype=torch.bfloat16
+            ) if kernel_collects_scores(fa_version) else None
         )
         self._reduced_score_buffer = torch.empty(
             self.max_batch_size, self.max_model_len,
@@ -117,6 +132,21 @@ class VegasAttnOverrider(BaseAttnOverrider):
         # table and the top-k workspace sizing, so they stay consistent.
         self._topk_width = self.max_tokens + 2 * self.num_spec_tokens + 1
 
+        model_config = vllm_config.model_config
+        self._draft_kv = (
+            GatheredDraftKV(
+                self.num_layers, self.max_batch_size, self._topk_width,
+                self.block_size, model_config.get_num_kv_heads(parallel_config),
+                model_config.get_head_size(), model_config.dtype, self.device,
+            ) if fa_version != 3 else None
+        )
+        logger.info(
+            "Vegas on FA%d: %s scores, %s draft KV",
+            fa_version,
+            "kernel" if self._attn_score_buffer is not None else "recomputed",
+            "gathered" if self._draft_kv is not None else "token-page",
+        )
+
         # Top-k workspace buffer. varlen_topk only needs a buffer at least as
         # large as calc_topk_workspace_size(batch, ...); a bigger one is fine
         # (it reads/zeros only what it needs by batch, max_k). It is passed
@@ -124,13 +154,14 @@ class VegasAttnOverrider(BaseAttnOverrider):
         topk_workspace_size = calc_topk_workspace_size(
             self.max_batch_size, self.max_model_len, self._topk_width
         )
-        if topk_workspace_size <= self._attn_score_buffer.nbytes:
+        if (self._attn_score_buffer is not None
+                and topk_workspace_size <= self._attn_score_buffer.nbytes):
             # Common case: reuse the attn_score buffer as scratch (it has
             # already been consumed by varlen_reduce before topk runs).
             self._topk_workspace = \
                 self._attn_score_buffer.view(torch.uint8).reshape(-1)
         else:
-            # Rare case: allocate a separate buffer.
+            # Fallback kernels have no score buffer to reuse.
             self._topk_workspace = torch.empty(
                 topk_workspace_size, device=self.device, dtype=torch.uint8
             )
@@ -183,7 +214,12 @@ class VegasAttnOverrider(BaseAttnOverrider):
             self._topk_valid_lens,
             # We should be inside the first drafting step,
             # and we need to prepare the page table for all drafting steps.
-            seqlens_k - 1 + self.num_spec_tokens,
+            # The scheduler caps lookahead allocation at max_model_len.
+            torch.where(
+                seqlens_k > 0,
+                (seqlens_k - 1 + self.num_spec_tokens).clamp(max=self.max_model_len),
+                0,
+            ),
             self._page_table.stride(0),
             self._page_table.stride(1),
             block_table.stride(0),
@@ -194,7 +230,7 @@ class VegasAttnOverrider(BaseAttnOverrider):
         # Repurpose topk_budget to store the number of total valid slots
         # for the draft attention (top-k slots + recent tokens).
         self._topk_budget[:self.batch_size] += \
-            seqlens_k - self._topk_valid_lens[:self.batch_size]
+            (seqlens_k - self._topk_valid_lens[:self.batch_size]).clamp(min=0)
 
     def enter_propose(self):
         super().enter_propose()
@@ -204,6 +240,8 @@ class VegasAttnOverrider(BaseAttnOverrider):
         # correct even when the verify pass is replayed as a graph and its
         # Python body (which used to reset this flag) does not execute.
         self._metadata_initialized = False
+        if self._draft_kv is not None:
+            self._draft_kv.begin_propose()
 
     def _draft_attention(self, *args, **kwargs):
         # Derive the live batch size from this step's own metadata. Under CUDA
@@ -219,24 +257,44 @@ class VegasAttnOverrider(BaseAttnOverrider):
         # Will be executed only once, resolve sparse kv slots.
         if self.curr_layer == 0:
             if self._metadata_initialized:
-                # Increase the used KV entries by one.
-                self._topk_budget[:self.batch_size] += 1
+                # Overflow rows use dummy position zero and write no KV.
+                self._topk_budget[:self.batch_size] += (
+                    kwargs["seqused_k"] > self._topk_valid_lens[:self.batch_size]
+                )
             else:
                 self._init_metadata(*args, **kwargs)
 
-        # Merge block_size dim into block_idx dim, making block_size = 1.
-        k: torch.Tensor = kwargs["k"]
-        v: torch.Tensor = kwargs["v"]
-        kwargs["k"] = k.view(-1, 1, k.shape[-2], k.shape[-1])
-        kwargs["v"] = v.view(-1, 1, v.shape[-2], v.shape[-1])
-        # Override sequence lengths and page table for draft attention.
-        kwargs["seqused_k"] = self._topk_budget[:self.batch_size]
-        kwargs["block_table"] = \
-            self._page_table[self.curr_layer, :self.batch_size]
+        if self._draft_kv is not None:
+            self._draft_kv.attention_kwargs(
+                kwargs, self.curr_layer,
+                self._page_table[self.curr_layer, :self.batch_size],
+                self._topk_budget[:self.batch_size],
+            )
+        else:
+            # FA3 accepts the original token-page view without copying KV.
+            k, v = kwargs["k"], kwargs["v"]
+            kwargs["k"] = k.view(-1, 1, k.shape[-2], k.shape[-1])
+            kwargs["v"] = v.view(-1, 1, v.shape[-2], v.shape[-1])
+            kwargs["seqused_k"] = self._topk_budget[:self.batch_size]
+            kwargs["block_table"] = \
+                self._page_table[self.curr_layer, :self.batch_size]
 
         return BaseAttnOverrider._original_attn_func(*args, **kwargs)
 
     def _verify_attention(self, *args, **kwargs):
+        # Recomputed weights must match the verifier's plain QK logits.
+        if self._attn_score_buffer is None and (
+            not kwargs.get("causal", False)
+            or kwargs.get("block_table") is None
+            or kwargs.get("alibi_slopes") is not None
+            or kwargs.get("softcap", 0) != 0
+            or tuple(kwargs.get("window_size") or (-1, -1)) != (-1, -1)
+            or kwargs.get("s_aux") is not None
+        ):
+            raise NotImplementedError(
+                "Vegas score recomputation requires causal paged attention "
+                "without cascade, sliding windows, ALiBi, softcap, or learned sinks"
+            )
         # Will be executed only once, compute metadata.
         if self.curr_layer == 0:
             seqlens_k: torch.Tensor = kwargs["seqused_k"]
@@ -255,6 +313,8 @@ class VegasAttnOverrider(BaseAttnOverrider):
             # In prefill: [0, seqlens_k)
             self._topk_valid_lens[:self.batch_size] = seqlens_k + 1 - \
                 seqlens_q.masked_fill(in_prefill, 1)
+            # Graph padding has no queries and may contain invalid page IDs.
+            self._topk_valid_lens[:self.batch_size].masked_fill_(seqlens_q == 0, 0)
 
             # Calculate per-request budget.
             self._topk_budget[:self.batch_size] = \
@@ -270,7 +330,8 @@ class VegasAttnOverrider(BaseAttnOverrider):
         # Collect per-query QK scores (first/last query) into the buffer.
         # In weight mode also return the per-token log-sum-exp so
         # the reduce kernel can rematerialize attention weights.
-        kwargs["scores"] = self._attn_score_buffer[:self.batch_size]
+        if self._attn_score_buffer is not None:
+            kwargs["scores"] = self._attn_score_buffer[:self.batch_size]
 
         cu_seqlens_q = kwargs["cu_seqlens_q"]
         if self._use_weight:
@@ -286,16 +347,24 @@ class VegasAttnOverrider(BaseAttnOverrider):
             softmax_scale = 1.0
 
         # Reduce scores/weights and get top-k indices for each request.
-        varlen_reduce(
-            x=self._attn_score_buffer[:self.batch_size],
-            valid_lens=self._topk_valid_lens[:self.batch_size],
-            reduce_entry=self._reduce_entry[:self.batch_size],
-            output=self._reduced_score_buffer[:self.batch_size],
-            lse=softmax_lse,
-            cu_seqlens_q=cu_seqlens_q,
-            softmax_scale=softmax_scale,
-            use_weight=self._use_weight,
-        )
+        if self._attn_score_buffer is not None:
+            varlen_reduce(
+                x=self._attn_score_buffer[:self.batch_size],
+                valid_lens=self._topk_valid_lens[:self.batch_size],
+                reduce_entry=self._reduce_entry[:self.batch_size],
+                output=self._reduced_score_buffer[:self.batch_size],
+                lse=softmax_lse,
+                cu_seqlens_q=cu_seqlens_q,
+                softmax_scale=softmax_scale,
+                use_weight=self._use_weight,
+            )
+        else:
+            score_tokens(
+                kwargs["q"], kwargs["k"], kwargs["block_table"], cu_seqlens_q,
+                self._topk_valid_lens[:self.batch_size],
+                self._reduce_entry[:self.batch_size], softmax_lse, softmax_scale,
+                self._use_weight, self._reduced_score_buffer[:self.batch_size],
+            )
         varlen_topk(
             metric=self._reduced_score_buffer[:self.batch_size],
             topks=self._topk_budget[:self.batch_size],

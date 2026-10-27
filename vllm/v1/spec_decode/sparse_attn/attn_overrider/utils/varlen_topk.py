@@ -10,9 +10,9 @@ Input:  metric (batch_size, max_len) — float16/bfloat16/float32
 Output: out_idxs (batch_size, max_k) — int32, filled in-place
 """
 
-import os
-import torch
 from typing import Optional
+
+import torch
 from torch.utils.cpp_extension import load_inline
 
 # ----------------------------------------------------------------
@@ -640,11 +640,6 @@ def _get_module():
     global _module
     if _module is not None:
         return _module
-
-    os.environ.setdefault(
-        "TORCH_CUDA_ARCH_LIST",
-        "8.0;8.9;9.0",
-    )
 
     _module = load_inline(
         name="batch_topk_jit",

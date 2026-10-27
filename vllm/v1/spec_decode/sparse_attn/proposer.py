@@ -154,12 +154,6 @@ class SparseAttnProposer:
             with_numpy=True,
         )
 
-        # Initialize attention overrider.
-        self.attn_overrider = build_attention_overrider(
-            vllm_config=self.vllm_config,
-            device=self.device,
-        )
-
     @property
     def sampled_token_ids(self) -> torch.Tensor:
         return self._sampled_token_ids[:self.batch_size]
@@ -379,7 +373,9 @@ class SparseAttnProposer:
             # Mask out the positions that exceed the max model length.
             # Otherwise, we may get out-of-range error in RoPE.
             positions = self.positions[:num_tokens]
-            exceeds_max_model_len = positions >= self.max_model_len
+            # Once a request overflows, later draft steps must not write its
+            # wrapped positions into the beginning of the committed cache.
+            exceeds_max_model_len |= positions >= self.max_model_len
             clamped_positions = \
                 torch.where(exceeds_max_model_len, 0, positions)
             self.positions[:num_tokens] = clamped_positions
@@ -565,6 +561,12 @@ class SparseAttnProposer:
         # Reuse runner's buffers for inputs and positions.
         self.input_ids = self.runner.input_ids.gpu
         self.positions = self.runner.positions.gpu
+
+        # Include persistent selection/gather buffers in model memory profiling.
+        self.attn_overrider = build_attention_overrider(
+            vllm_config=self.vllm_config,
+            device=self.device,
+        )
 
     @torch.inference_mode()
     @_method_wrapper(enter_fn=_enter_propose, exit_fn=_exit_propose)

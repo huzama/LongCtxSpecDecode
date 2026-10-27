@@ -63,6 +63,7 @@ speculative_config = {
 llm = LLM(
     model="Qwen/Qwen3-8B",
     speculative_config=speculative_config,
+    disable_cascade_attn=True,
 )
 print(llm.generate(..., SamplingParams(...)))
 ```
@@ -78,6 +79,38 @@ Key knobs (`speculative_config`):
 
 The top-k ranking metric (`"logit"` raw scores vs `"weight"` rematerialized
 softmax weights) is a class-level `SCORE_MODE` toggle on `VegasAttnOverrider`.
+
+## GPU compatibility
+
+Vegas selects its scoring and KV-access paths from the loaded attention kernel:
+
+| Backend | Score collection | Draft KV access |
+| --- | --- | --- |
+| Patched FA3 on Hopper | Verification kernel supplies scores | One-token pages |
+| FA2, or FA3 without score collection | Triton recomputes first/last-query scores | Gathered pages on FA2; one-token pages on FA3 |
+| FA4 on SM100 Blackwell | Triton recomputes first/last-query scores | Gathered pages |
+
+For B200, install `flash-attn-4==4.0.0b33` and pass
+`attention_config={"flash_attn_version": 4}` to `LLM`. FA4 is opt-in.
+FA4 models with head dimension 256 require `block_size=128`.
+The CUDA toolkit must match the PyTorch installation; make `nvcc` and `ninja`
+available before running Vegas. JIT compilation uses the detected GPU or an
+explicit `TORCH_CUDA_ARCH_LIST`, without overriding it.
+
+The fallback supports causal decoder attention with unquantized KV. Disable
+cascade attention as above; sliding windows, ALiBi, softcap and learned sinks
+are rejected. Scoring reads K once more after verification. Drafting gathers
+selected KV once per round, then appends each new token. Persistent scratch is
+included in model-load memory accounting. Recomputed scores use the same
+ranking formula; floating-point rounding can change selections near ties.
+
+Run the focused tests inside a GPU allocation. `VEGAS_TEST_FA=4` selects FA4;
+`VEGAS_TEST_MODEL` enables the model tests and must name a cached checkpoint:
+
+```bash
+VEGAS_TEST_FA=2 VEGAS_TEST_MODEL=Qwen/Qwen3-0.6B .venv/bin/python -m pytest \
+    --confcutdir=tests/v1/spec_decode/sparse_attn tests/v1/spec_decode/sparse_attn
+```
 
 ## Example
 
